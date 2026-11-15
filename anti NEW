@@ -282,6 +282,31 @@ local function getCarriedEggsCount()
     return getCarriedCratesCount()
 end
 
+-- Future: EraCarry menjadi sumber hitungan utama.
+-- Jangan memakai nilai HUD untuk jumlah bawaan karena HUD dapat terlambat
+-- memperbarui angka setelah proses setor selesai.
+local function getFutureCarriedCount()
+    local carry = player:GetAttribute("EraCarry")
+    if typeof(carry) == "string" then
+        if carry == "" then return 0 end
+        local count = 0
+        for _ in string.gmatch(carry, "[^,]+") do
+            count = count + 1
+        end
+        return count
+    elseif typeof(carry) == "number" then
+        return math.max(0, carry)
+    end
+
+    -- Fallback jika attribute belum tersedia.
+    return countCarriedAboveHead()
+end
+
+local function getFutureCarryCapacity()
+    local _, maxFromHUD = countFromHUD()
+    return maxFromHUD or 10
+end
+
 local function getAllRelics()
     local attr = player:GetAttribute("EraRelics")
     local relics = {}
@@ -965,171 +990,246 @@ local function getRobotsInZone(zone)
     return robots
 end
 
-local function collectFutureCrates(checkLimit)
+local function collectFutureCrates(checkLimit, getCarryCount)
     local collectedAny = false
     local crates = getSciCrates() -- Sudah di-sort prioritas rarity tertinggi
-    local targetCap = 10
-    
+    local targetCap = getFutureCarryCapacity()
+    local readCarry = getCarryCount or getFutureCarriedCount
+
     for _, crate in ipairs(crates) do
         if not autoEraTripEnabled or not isInEra("Future") then break end
-        
-        local curCount, maxFromHUD = getCarriedCratesCount()
-        local cap = maxFromHUD or targetCap
-        if checkLimit and curCount >= cap then
+
+        local curCount = readCarry()
+        if checkLimit and curCount >= targetCap then
             break
         end
-        
+
         if not crate.Parent then continue end
-        
+
         local cratePos = crate:GetPivot().Position
-        -- TP tepat ke crate di tanah & reset velocity agar tidak terlempar/terjeda
         safePivotTo(CFrame.new(cratePos.X, cratePos.Y + 1.2, cratePos.Z))
+
         local _, myRoot = getCharacterParts()
         if myRoot then
             myRoot.AssemblyLinearVelocity = Vector3.zero
         end
-        
-        -- Ambil cepat: server mendeteksi pickup dalam puluhan ms
-        local deadline = os.clock() + 0.18
-        while os.clock() < deadline and crate.Parent do
-            local newCount = getCarriedCratesCount()
-            if newCount > curCount or (checkLimit and newCount >= cap) then
+
+        -- Tunggu konfirmasi pickup, bukan menganggap berhasil hanya karena
+        -- karakter sudah teleport ke posisi crate.
+        local deadline = os.clock() + 0.35
+        local pickedUp = false
+        while os.clock() < deadline do
+            local newCount = readCarry()
+            if newCount > curCount or not crate.Parent then
+                pickedUp = true
+                break
+            end
+            if checkLimit and newCount >= targetCap then
+                pickedUp = true
                 break
             end
             task.wait(0.03)
         end
-        
-        collectedAny = true
-        
-        local nowCount = getCarriedCratesCount()
-        if checkLimit and nowCount >= cap then
+
+        if pickedUp then
+            collectedAny = true
+        end
+
+        if checkLimit and readCarry() >= targetCap then
             break
         end
     end
-    
+
     return collectedAny
 end
+
+-- Satu jalur setor Future. Prompt diaktifkan bila tersedia; timeout tetap
+-- membatasi waktu agar karakter tidak tertahan di EraCollect.
+local function depositFuture()
+    safePivotTo(FUTURE_COLLECT_CF)
+    task.wait(0.2)
+
+    local eraTrip = Workspace:FindFirstChild("EraTrip")
+    local future = eraTrip and eraTrip:FindFirstChild("Future")
+    local collectPart = future and future:FindFirstChild("EraCollect")
+    local prompt = collectPart and collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
+
+    if prompt and prompt.Enabled then
+        pcall(function() fireproximityprompt(prompt) end)
+    end
+
+    local deadline = os.clock() + 2.5
+    while getFutureCarriedCount() > 0 and os.clock() < deadline do
+        task.wait(0.1)
+    end
+
+    -- Retry prompt satu kali jika server belum mengosongkan carry.
+    if getFutureCarriedCount() > 0 and prompt and prompt.Parent and prompt.Enabled then
+        pcall(function() fireproximityprompt(prompt) end)
+        local retryDeadline = os.clock() + 1.5
+        while getFutureCarriedCount() > 0 and os.clock() < retryDeadline do
+            task.wait(0.1)
+        end
+    end
+
+    local remaining = getFutureCarriedCount()
+    safePivotTo(FUTURE_KICK_READY_CF)
+    task.wait(0.25)
+    return remaining
+end
+
 
 -- ================= MAIN FUTURE ROUTINE =================
 local function handleFutureEra()
     local initializedAtKickReady = false
-    
-    while autoEraTripEnabled and isInEra("Future") and Workspace:GetAttribute("EraTripState") == "Open" do
-        -- Step 1: Sekali di awal, TP ke EraKickReady, jeda 0.5s
+    local carryOffset = 0
+
+    local function getEffectiveCarryCount()
+        local rawCount = getFutureCarriedCount()
+
+        -- Jika carry lama tidak di-clear oleh HUD/replication, abaikan baseline
+        -- itu. Kenaikan berikutnya tetap dihitung sebagai crate baru.
+        if carryOffset > 0 then
+            if rawCount < carryOffset then
+                carryOffset = 0
+                return rawCount
+            end
+            return rawCount - carryOffset
+        end
+
+        return rawCount
+    end
+
+    local function depositAndResume()
+        local remaining = depositFuture()
+        if remaining > 0 then
+            -- Jangan ulangi deposit untuk carry lama yang tidak berubah.
+            carryOffset = remaining
+        else
+            carryOffset = 0
+        end
+    end
+
+    while autoEraTripEnabled and isInEra("Future")
+        and Workspace:GetAttribute("EraTripState") == "Open" do
+
         if not initializedAtKickReady then
             safePivotTo(FUTURE_KICK_READY_CF)
-            task.wait(0.5)
+            task.wait(0.35)
             initializedAtKickReady = true
         end
-        
-        local carried, maxFromHUD = getCarriedCratesCount()
-        local targetCap = maxFromHUD or 10
-        
-        -- Step 2: Cek apakah sudah bawa 10 peti (atau penuh) -> langsung setor ke EraCollect & kembali ke KickReady
-        if carried >= targetCap then
-            safePivotTo(FUTURE_COLLECT_CF)
-            local depositStart = os.clock()
-            while getCarriedCratesCount() > 0 and os.clock() - depositStart < 3 do
-                task.wait(0.2)
-            end
-            task.wait(0.3)
-            safePivotTo(FUTURE_KICK_READY_CF)
-            task.wait(0.3)
-            -- Setelah setor, reset dan langsung mulai lagi dari Zona Tertinggi (Zone 5)!
+
+        local carried = getEffectiveCarryCount()
+        local targetCap = getFutureCarryCapacity()
+
+        -- Hanya setor jika ada crate baru yang benar-benar terhitung penuh.
+        if carried > 0 and carried >= targetCap then
+            depositAndResume()
             continue
         end
-        
-        -- Step 3: Looting dari Zona Tertinggi ke Bawah (Zone 5 -> 1)
+
+        -- Looting dari Zone 5 ke Zone 1.
         for _, zone in ipairs(FUTURE_ZONES) do
-            if not autoEraTripEnabled or not isInEra("Future") or Workspace:GetAttribute("EraTripState") ~= "Open" then
+            if not autoEraTripEnabled or not isInEra("Future")
+                or Workspace:GetAttribute("EraTripState") ~= "Open" then
                 break
             end
-            
-            local currentCarried = getCarriedCratesCount()
-            if currentCarried >= targetCap then
+
+            if getEffectiveCarryCount() >= targetCap then
                 break
             end
-            
+
             local zoneTimeout = os.clock() + 20
-            while autoEraTripEnabled and isInEra("Future") and os.clock() < zoneTimeout do
-                -- Cek batas bawa LEBIH DULU
-                if getCarriedCratesCount() >= targetCap then break end
-                
-                -- Pungut crate dengan prioritas rarity tertinggi duluan
-                collectFutureCrates(true)
-                if getCarriedCratesCount() >= targetCap then break end
-                
+            while autoEraTripEnabled and isInEra("Future")
+                and Workspace:GetAttribute("EraTripState") == "Open"
+                and os.clock() < zoneTimeout do
+
+                if getEffectiveCarryCount() >= targetCap then
+                    break
+                end
+
+                collectFutureCrates(true, getEffectiveCarryCount)
+                if getEffectiveCarryCount() >= targetCap then
+                    break
+                end
+
                 local robots = getRobotsInZone(zone)
-                if #robots == 0 then break end
-                
+                if #robots == 0 then
+                    break
+                end
+
                 local targetRobot = robots[1]
                 local root = targetRobot:FindFirstChild("RootPart") or targetRobot.PrimaryPart
-                
+
                 if root and targetRobot.Parent then
                     local robotPos = root.Position
-                    -- Melayang aman di atas & belakang jangkauan robot (Y+15, Z+16) menghadap target
-                    local safeCF = CFrame.lookAt(Vector3.new(robotPos.X, robotPos.Y + 15, robotPos.Z + 16), robotPos)
+                    local safeCF = CFrame.lookAt(
+                        Vector3.new(robotPos.X, robotPos.Y + 15, robotPos.Z + 16),
+                        robotPos
+                    )
                     safePivotTo(safeCF)
+
                     local _, initRoot = getCharacterParts()
                     if initRoot then
                         initRoot.AssemblyLinearVelocity = Vector3.zero
                     end
-                    
-                    -- Spam tembakan ke robot: perbarui hover & kunci velocity di tiap tembakan agar TIDAK jatuh oleh gravitasi
+
                     for _ = 1, 6 do
-                        if not autoEraTripEnabled or not targetRobot.Parent or getCarriedCratesCount() >= targetCap then break end
-                        
+                        if not autoEraTripEnabled or not targetRobot.Parent
+                            or getEffectiveCarryCount() >= targetCap then
+                            break
+                        end
+
                         local curRoot = targetRobot:FindFirstChild("RootPart") or targetRobot.PrimaryPart
                         if curRoot then
                             local rPos = curRoot.Position
-                            local hoverCF = CFrame.lookAt(Vector3.new(rPos.X, rPos.Y + 15, rPos.Z + 16), rPos)
+                            local hoverCF = CFrame.lookAt(
+                                Vector3.new(rPos.X, rPos.Y + 15, rPos.Z + 16),
+                                rPos
+                            )
                             safePivotTo(hoverCF)
+
                             local _, myRoot = getCharacterParts()
                             if myRoot then
                                 myRoot.AssemblyLinearVelocity = Vector3.zero
                             end
                         end
-                        
+
                         shootBlaster()
                         task.wait(0.12)
                     end
-                    
-                    collectFutureCrates(true)
+
+                    collectFutureCrates(true, getEffectiveCarryCount)
                 else
                     task.wait(0.1)
                 end
             end
-            
-            collectFutureCrates(true)
-            task.wait(0.2)
-            
-            -- Jika setelah zona selesai peti sudah 10 / penuh, langsung break ke setor
-            if getCarriedCratesCount() >= targetCap then
+
+            collectFutureCrates(true, getEffectiveCarryCount)
+            task.wait(0.15)
+
+            if getEffectiveCarryCount() >= targetCap then
                 break
             end
         end
-        
-        -- Kumpulkan sisa peti
-        collectFutureCrates(true)
-        
-        -- Jika membawa peti setelah putaran zona selesai, setor ke EraCollect & kembali ke KickReady
-        if getCarriedCratesCount() > 0 then
-            safePivotTo(FUTURE_COLLECT_CF)
-            local depositStart = os.clock()
-            while getCarriedCratesCount() > 0 and os.clock() - depositStart < 3 do
-                task.wait(0.2)
-            end
-            task.wait(0.3)
-            safePivotTo(FUTURE_KICK_READY_CF)
-            task.wait(0.3)
+
+        -- Ambil sisa crate yang tersedia, lalu setor hanya jika ada hasil.
+        collectFutureCrates(true, getEffectiveCarryCount)
+
+        local finalCarry = getEffectiveCarryCount()
+        if finalCarry > 0 then
+            depositAndResume()
         end
-        
-        -- Mampir ke Trader HANYA di menit ke-9 (sisa <= 65s) selama 1 detik untuk borong craft
-        checkFinalMinuteTraderCraft("Future", "FutureMythic", canCraftMechaPizzone, FUTURE_TRADER_CF, FUTURE_KICK_READY_CF)
-        
-        task.wait(0.3)
+
+        checkFinalMinuteTraderCraft(
+            "Future", "FutureMythic", canCraftMechaPizzone,
+            FUTURE_TRADER_CF, FUTURE_KICK_READY_CF
+        )
+
+        task.wait(0.25)
     end
 end
+
 
 -- ================= ROMAN ERA SCANNING & AUTOMATION =================
 local function getRomanGuards()
