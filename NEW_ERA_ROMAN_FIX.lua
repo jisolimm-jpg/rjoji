@@ -749,44 +749,63 @@ end
 
 local function collectFutureCrates(checkLimit)
     local collectedAny = false
-    local crates = getSciCrates() -- Sudah di-sort prioritas rarity tertinggi
+    -- getSciCrates sudah mengurutkan Tier tertinggi dahulu (5 > 4 > 3 > 2 > 1).
+    local crates = getSciCrates()
     local targetCap = 10
-    
+
     for _, crate in ipairs(crates) do
-        if not autoEraTripEnabled or not isInEra("Future") then break end
-        
-        local curCount, maxFromHUD = getCarriedCratesCount()
+        if not autoEraTripEnabled or not isInEra("Future") then
+            break
+        end
+
+        local curCount, maxFromHUD = getFutureCarriedCount()
         local cap = maxFromHUD or targetCap
         if checkLimit and curCount >= cap then
             break
         end
-        
-        if not crate.Parent then continue end
-        
+
+        if not crate.Parent then
+            continue
+        end
+
         local cratePos = crate:GetPivot().Position
-        -- TP tepat ke crate di tanah
         safePivotTo(CFrame.new(cratePos.X, cratePos.Y + 1.5, cratePos.Z))
-        
-        -- Tunggu sampai crate diambil: crate di-destroy server ATAU count bertambah
-        local deadline = os.clock() + 0.5
-        while os.clock() < deadline and crate.Parent do
-            local newCount = getCarriedCratesCount()
-            if newCount > curCount or newCount >= cap then
+
+        -- Tunggu singkat untuk pickup; berhenti lebih awal jika crate hilang
+        -- atau hitungan EraCarry bertambah. Ini memangkas jeda 0.5s per crate.
+        local gotCrate = false
+        local deadline = os.clock() + 0.22
+        while os.clock() < deadline do
+            if not crate.Parent then
+                gotCrate = true
                 break
             end
-            task.wait(0.05)
+
+            local newCount = getFutureCarriedCount()
+            if newCount > curCount then
+                gotCrate = true
+                break
+            end
+            if checkLimit and newCount >= cap then
+                gotCrate = true
+                break
+            end
+            task.wait(0.03)
         end
-        
-        collectedAny = true
-        
-        local nowCount = getCarriedCratesCount()
+
+        if gotCrate then
+            collectedAny = true
+        end
+
+        local nowCount = getFutureCarriedCount()
         if checkLimit and nowCount >= cap then
             break
         end
     end
-    
+
     return collectedAny
 end
+
 
 -- Satu jalur setor Future: trigger prompt, tunggu konfirmasi, lalu kembali KickReady.
 local function depositFuture()
