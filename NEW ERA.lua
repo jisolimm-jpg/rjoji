@@ -472,14 +472,14 @@ local MiscTab = Window:Tab({
     Icon = "settings",
 })
 
+-- Ikon sengaja dihilangkan untuk kompatibilitas WindUI.
+-- Beberapa build WindUI tidak merender tab jika nama ikon tidak dikenali.
 local ScheduleTab = Window:Tab({
     Title = "Jadwal",
-    Icon = "calendar",
 })
 
 local InventoryTab = Window:Tab({
     Title = "Inventaris",
-    Icon = "package",
 })
 
 -- ================= CONFIG STATE =================
