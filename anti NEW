@@ -282,43 +282,6 @@ local function getCarriedEggsCount()
     return getCarriedCratesCount()
 end
 
--- Counter khusus Roman/Jurassic: HUD tidak dipakai karena nilainya bisa terlambat
--- reset setelah setor. Baseline di-reset saat server count benar-benar turun.
-local function makeEraCarryCounter()
-    local baseline = 0
-    local lastRaw = 0
-
-    local function rawCount()
-        local attrCount = 0
-        local carry = player:GetAttribute("EraCarry")
-        if typeof(carry) == "string" and carry ~= "" then
-            for _ in string.gmatch(carry, "[^,]+") do
-                attrCount = attrCount + 1
-            end
-        elseif typeof(carry) == "number" then
-            attrCount = math.max(0, carry)
-        end
-        return math.max(attrCount, countCarriedAboveHead())
-    end
-
-    local function count()
-        local raw = rawCount()
-        if raw < lastRaw then
-            baseline = 0
-        end
-        lastRaw = raw
-        return math.max(0, raw - baseline)
-    end
-
-    local function markDeposited()
-        local raw = rawCount()
-        baseline = raw
-        lastRaw = raw
-    end
-
-    return count, markDeposited
-end
-
 local function getAllRelics()
     local attr = player:GetAttribute("EraRelics")
     local relics = {}
@@ -1257,7 +1220,7 @@ local function getReadyChests()
     return ready
 end
 
-local function collectDroppedLoot(getCarryCount)
+local function collectDroppedLoot()
     local eraTrip = Workspace:FindFirstChild("EraTrip")
     local roman = eraTrip and (eraTrip:FindFirstChild("Roman") or eraTrip)
     if not roman then return false end
@@ -1266,7 +1229,7 @@ local function collectDroppedLoot(getCarryCount)
     for _, child in ipairs(roman:GetDescendants()) do
         if child.Name == "DroppedLoot" and child:FindFirstChild("Base") then
             local prompt = child.Base:FindFirstChild("SwapLoot")
-            if prompt and (getCarryCount and getCarryCount() or getCarriedCratesCount()) < 5 then
+            if prompt and getCarriedCratesCount() < 5 then
                 safePivotTo(CFrame.new(child.Base.Position) * CFrame.new(0, 2, 0))
                 task.wait(0.15)
                 pcall(function() fireproximityprompt(prompt) end)
@@ -1318,16 +1281,14 @@ local function fightGuard(guard)
     end
 end
 
-local function depositRoman(getCarryCount, markDeposited)
+local function depositRoman()
     -- 1. TP ke EraCollect untuk setor peti
     safePivotTo(ROMAN_COLLECT_CF)
     local depositStart = os.clock()
-    while getCarryCount() > 0 and os.clock() - depositStart < 2.5 do
+    while getCarriedCratesCount() > 0 and os.clock() - depositStart < 2.5 do
         task.wait(0.2)
     end
     task.wait(0.2)
-    
-    if markDeposited then markDeposited() end
     
     -- 2. Langsung kembali ke EraKickReady
     safePivotTo(ROMAN_KICK_READY_CF)
@@ -1340,29 +1301,28 @@ local function handleRomanEra()
     safePivotTo(ROMAN_KICK_READY_CF)
     task.wait(0.5)
     
-    local getRomanCarryCount, markRomanDeposited = makeEraCarryCounter()
     local isWaitingAtKickReady = false
 
     while autoEraTripEnabled and isInEra("Roman") and Workspace:GetAttribute("EraTripState") == "Open" do
         -- 1. Jika tas penuh (>= 5), langsung setor ke EraCollect
-        if getRomanCarryCount() >= 5 then
-            depositRoman(getRomanCarryCount, markRomanDeposited)
+        if getCarriedCratesCount() >= 5 then
+            depositRoman()
             isWaitingAtKickReady = false
         end
 
         -- 2. Ambil DroppedLoot yang ada di tanah
-        collectDroppedLoot(getRomanCarryCount)
-        if getRomanCarryCount() >= 5 then
-            depositRoman(getRomanCarryCount, markRomanDeposited)
+        collectDroppedLoot()
+        if getCarriedCratesCount() >= 5 then
+            depositRoman()
             isWaitingAtKickReady = false
         end
 
         -- 3. Cari dan buka Chest yang sudah Ready (Prioritas Tier 5 Mythic -> 1)
         local readyChests = getReadyChests()
-        if #readyChests > 0 and getRomanCarryCount() < 5 then
+        if #readyChests > 0 and getCarriedCratesCount() < 5 then
             isWaitingAtKickReady = false
             for _, item in ipairs(readyChests) do
-                if not autoEraTripEnabled or not isInEra("Roman") or getRomanCarryCount() >= 5 then break end
+                if not autoEraTripEnabled or not isInEra("Roman") or getCarriedCratesCount() >= 5 then break end
                 local chest = item.chest
                 local prompt = item.prompt or (chest:FindFirstChild("ChestBody") and chest.ChestBody:FindFirstChild("OpenChest"))
                 if chest.Parent and (chest:GetAttribute("Ready") == true or (prompt and prompt.Enabled)) then
@@ -1373,18 +1333,18 @@ local function handleRomanEra()
                         pcall(function() fireproximityprompt(prompt) end)
                     end
                     task.wait(0.5)
-                    collectDroppedLoot(getRomanCarryCount)
+                    collectDroppedLoot()
                 end
             end
 
-            if getRomanCarryCount() >= 5 then
-                depositRoman(getRomanCarryCount, markRomanDeposited)
+            if getCarriedCratesCount() >= 5 then
+                depositRoman()
             end
         end
 
         -- 4. Cari Guard yang masih hidup (Prioritas Tier 5 Boss -> 1)
         local guards = getRomanGuards()
-        if #guards > 0 and getRomanCarryCount() < 5 then
+        if #guards > 0 and getCarriedCratesCount() < 5 then
             isWaitingAtKickReady = false
             local targetGuard = guards[1]
             local targetName = targetGuard:GetAttribute("Model") or targetGuard.Name
@@ -1393,10 +1353,10 @@ local function handleRomanEra()
             task.wait(0.2)
 
             -- Buka chest dan ambil loot yang baru saja dibuka dari guard ini
-            collectDroppedLoot(getRomanCarryCount)
+            collectDroppedLoot()
             local afterChests = getReadyChests()
             for _, item in ipairs(afterChests) do
-                if getRomanCarryCount() >= 5 then break end
+                if getCarriedCratesCount() >= 5 then break end
                 local chest = item.chest
                 local prompt = item.prompt
                 if chest.Parent and (chest:GetAttribute("Ready") == true or (prompt and prompt.Enabled)) then
@@ -1404,18 +1364,18 @@ local function handleRomanEra()
                     task.wait(0.15)
                     if prompt then pcall(function() fireproximityprompt(prompt) end) end
                     task.wait(0.5)
-                    collectDroppedLoot(getRomanCarryCount)
+                    collectDroppedLoot()
                 end
             end
 
-            if getRomanCarryCount() >= 5 then
-                depositRoman(getRomanCarryCount, markRomanDeposited)
+            if getCarriedCratesCount() >= 5 then
+                depositRoman()
             end
         end
 
         -- 5. Jika tidak ada lagi guard hidup & tidak ada chest ready, tapi masih membawa peti (>0), setor ke EraCollect
-        if #guards == 0 and #readyChests == 0 and getRomanCarryCount() > 0 then
-            depositRoman(getRomanCarryCount, markRomanDeposited)
+        if #guards == 0 and #readyChests == 0 and getCarriedCratesCount() > 0 then
+            depositRoman()
             isWaitingAtKickReady = false
         end
 
@@ -1424,7 +1384,7 @@ local function handleRomanEra()
 
         -- 7. Jika arena bersih (guard kalah semua & chest habis), tunggu wave berikutnya di EraKickReady
         -- PENTING: Hanya TP sekali saat masuk mode tunggu agar tidak terjadi loop-teleport yang stuttering!
-        if #guards == 0 and #readyChests == 0 and getRomanCarryCount() == 0 then
+        if #guards == 0 and #readyChests == 0 and getCarriedCratesCount() == 0 then
             statusParagraph:SetDesc("Roman: Menunggu wave guard / chest berikutnya...")
             if not isWaitingAtKickReady then
                 safePivotTo(ROMAN_KICK_READY_CF)
@@ -1481,7 +1441,7 @@ local function getActiveEggsInNest(nest)
     return eggs
 end
 
-local function depositJurassic(getCarryCount, markDeposited)
+local function depositJurassic()
     -- 1. TP ke EraCollect untuk menetaskan telur
     local eraTrip = Workspace:FindFirstChild("EraTrip")
     local jurassic = eraTrip and eraTrip:FindFirstChild("Jurassic")
@@ -1499,7 +1459,7 @@ local function depositJurassic(getCarryCount, markDeposited)
     end
 
     local depositStart = os.clock()
-    while getCarryCount() > 0 and (os.clock() - depositStart) < 3.0 do
+    while getCarriedEggsCount() > 0 and (os.clock() - depositStart) < 3.0 do
         task.wait(0.15)
         if collectPart then
             local prompt = collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
@@ -1508,7 +1468,6 @@ local function depositJurassic(getCarryCount, markDeposited)
     end
 
     task.wait(0.2)
-    if markDeposited then markDeposited() end
     -- Setelah setor di EraCollect, WAJIB kembali ke KickReady agar siap melooping berikutnya!
     safePivotTo(JURASSIC_KICK_READY_CF)
     local _, r = getCharacterParts()
@@ -1669,8 +1628,6 @@ end
 
 -- ================= MAIN JURASSIC ROUTINE =================
 local function handleJurassicEra()
-    local getJurassicCarryCount, markJurassicDeposited = makeEraCarryCounter()
-
     -- Helper: tunggu sampai Chaser berjarak aman dari target posisi
     local function waitForChaserSafe(targetPos, safeDist)
         local eraTripFolder = Workspace:FindFirstChild("EraTrip")
@@ -1703,8 +1660,8 @@ local function handleJurassicEra()
 
     while autoEraTripEnabled and isInEra("Jurassic") and Workspace:GetAttribute("EraTripState") == "Open" do
         -- 1. Jika masih ada telur yang terbawa, langsung setor ke EraCollect & balik ke KickReady
-        if getJurassicCarryCount() > 0 then
-            depositJurassic(getJurassicCarryCount, markJurassicDeposited)
+        if getCarriedEggsCount() > 0 then
+            depositJurassic()
         end
 
         local nests = getJurassicNests()
@@ -1781,7 +1738,7 @@ local function handleJurassicEra()
         local eggDeposited = false
         for _, nest in ipairs(processingList) do
             if not autoEraTripEnabled or not isInEra("Jurassic") or Workspace:GetAttribute("EraTripState") ~= "Open" then break end
-            if getJurassicCarryCount() >= maxCap then break end
+            if getCarriedEggsCount() >= maxCap then break end
 
             local nestPos = nest:GetPivot().Position
             local safe = waitForChaserSafe(nestPos, CHASER_SAFE_DIST)
@@ -1797,7 +1754,7 @@ local function handleJurassicEra()
 
             for _, prompt in ipairs(activePrompts) do
                 if not autoEraTripEnabled or not isInEra("Jurassic") or Workspace:GetAttribute("EraTripState") ~= "Open" then break end
-                if getJurassicCarryCount() >= maxCap then break end
+                if getCarriedEggsCount() >= maxCap then break end
                 if not prompt.Enabled or not prompt.Parent then continue end
 
                 -- Teleport ke telur
@@ -1815,8 +1772,8 @@ local function handleJurassicEra()
                 task.wait(math.max(0.75, hold + 0.1))
 
                 -- Begitu ambil 1 telur langsung setor ke EraCollect & kembali ke KickReady!
-                if getJurassicCarryCount() >= maxCap then
-                    depositJurassic(getJurassicCarryCount, markJurassicDeposited)
+                if getCarriedEggsCount() >= maxCap then
+                    depositJurassic()
                     eggDeposited = true
                     break
                 end
