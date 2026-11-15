@@ -303,6 +303,22 @@ local function getRomanCarriedCount()
     return countCarriedAboveHead()
 end
 
+-- Future: gunakan EraCarry server terlebih dahulu agar hitungan HUD/model lama
+-- setelah setor tidak memicu teleport EraCollect berulang.
+local function getFutureCarriedCount()
+    local carry = player:GetAttribute("EraCarry")
+    if typeof(carry) == "string" then
+        local count = 0
+        for _ in string.gmatch(carry, "[^,]+") do count = count + 1 end
+        return count
+    elseif typeof(carry) == "number" then
+        return carry
+    end
+    local countHUD = countFromHUD()
+    if countHUD ~= nil then return countHUD end
+    return countCarriedAboveHead()
+end
+
 local function getAllRelics()
     local attr = player:GetAttribute("EraRelics")
     local relics = {}
@@ -772,6 +788,28 @@ local function collectFutureCrates(checkLimit)
     return collectedAny
 end
 
+-- Satu jalur setor Future: trigger prompt, tunggu konfirmasi, lalu kembali KickReady.
+local function depositFuture()
+    safePivotTo(FUTURE_COLLECT_CF)
+    task.wait(0.2)
+
+    local eraTrip = Workspace:FindFirstChild("EraTrip")
+    local future = eraTrip and eraTrip:FindFirstChild("Future")
+    local collectPart = future and future:FindFirstChild("EraCollect")
+    local prompt = collectPart and collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and prompt.Enabled then
+        pcall(function() fireproximityprompt(prompt) end)
+    end
+
+    local depositStart = os.clock()
+    while getFutureCarriedCount() > 0 and os.clock() - depositStart < 5 do
+        task.wait(0.2)
+    end
+    task.wait(0.3)
+    safePivotTo(FUTURE_KICK_READY_CF)
+    task.wait(0.3)
+end
+
 -- ================= MAIN FUTURE ROUTINE =================
 local function handleFutureEra()
     local initializedAtKickReady = false
@@ -784,20 +822,13 @@ local function handleFutureEra()
             initializedAtKickReady = true
         end
         
-        local carried, maxFromHUD = getCarriedCratesCount()
+        local carried, maxFromHUD = getFutureCarriedCount()
         local targetCap = maxFromHUD or 10
         
         -- Step 2: Cek apakah sudah bawa 10 peti (atau penuh) -> langsung setor ke EraCollect & kembali ke KickReady
         if carried >= targetCap then
-            safePivotTo(FUTURE_COLLECT_CF)
-            local depositStart = os.clock()
-            while getCarriedCratesCount() > 0 and os.clock() - depositStart < 3 do
-                task.wait(0.2)
-            end
-            task.wait(0.3)
-            safePivotTo(FUTURE_KICK_READY_CF)
-            task.wait(0.3)
-            -- Setelah setor, reset dan langsung mulai lagi dari Zona Tertinggi (Zone 5)!
+            depositFuture()
+            -- Setelah setor, mulai ulang dari Zone 5.
             continue
         end
         
@@ -807,7 +838,7 @@ local function handleFutureEra()
                 break
             end
             
-            local currentCarried = getCarriedCratesCount()
+            local currentCarried = getFutureCarriedCount()
             if currentCarried >= targetCap then
                 break
             end
@@ -815,11 +846,11 @@ local function handleFutureEra()
             local zoneTimeout = os.clock() + 20
             while autoEraTripEnabled and isInEra("Future") and os.clock() < zoneTimeout do
                 -- Cek batas bawa LEBIH DULU
-                if getCarriedCratesCount() >= targetCap then break end
+                if getFutureCarriedCount() >= targetCap then break end
                 
                 -- Pungut crate dengan prioritas rarity tertinggi duluan
                 collectFutureCrates(true)
-                if getCarriedCratesCount() >= targetCap then break end
+                if getFutureCarriedCount() >= targetCap then break end
                 
                 local robots = getRobotsInZone(zone)
                 if #robots == 0 then break end
@@ -834,7 +865,7 @@ local function handleFutureEra()
                     
                     -- Spam tembakan ke robot, sambil cek carry limit setiap tembakan
                     for _ = 1, 6 do
-                        if not autoEraTripEnabled or not targetRobot.Parent or getCarriedCratesCount() >= targetCap then break end
+                        if not autoEraTripEnabled or not targetRobot.Parent or getFutureCarriedCount() >= targetCap then break end
                         shootBlaster()
                         task.wait(0.12)
                     end
@@ -849,7 +880,7 @@ local function handleFutureEra()
             task.wait(0.2)
             
             -- Jika setelah zona selesai peti sudah 10 / penuh, langsung break ke setor
-            if getCarriedCratesCount() >= targetCap then
+            if getFutureCarriedCount() >= targetCap then
                 break
             end
         end
@@ -858,15 +889,10 @@ local function handleFutureEra()
         collectFutureCrates(true)
         
         -- Jika membawa peti setelah putaran zona selesai, setor ke EraCollect & kembali ke KickReady
-        if getCarriedCratesCount() > 0 then
-            safePivotTo(FUTURE_COLLECT_CF)
-            local depositStart = os.clock()
-            while getCarriedCratesCount() > 0 and os.clock() - depositStart < 3 do
-                task.wait(0.2)
-            end
-            task.wait(0.3)
-            safePivotTo(FUTURE_KICK_READY_CF)
-            task.wait(0.3)
+        if getFutureCarriedCount() > 0 then
+            depositFuture()
+            -- Jangan lanjutkan putaran lama; mulai ulang dari Zone 5.
+            continue
         end
         
         -- Mampir ke Trader HANYA di menit ke-9 (sisa <= 65s) selama 1 detik untuk borong craft
