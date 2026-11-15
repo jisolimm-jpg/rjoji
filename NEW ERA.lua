@@ -286,8 +286,18 @@ end
 -- Jurassic memakai attribute EraCarry dan model CarriedEgg yang sama.
 -- Wrapper ini mencegah pemanggilan fungsi yang sebelumnya belum didefinisikan.
 local function getCarriedEggsCount()
-    return getCarriedCratesCount()
+    local carry = player:GetAttribute("EraCarry")
+    if typeof(carry) == "string" then
+        if carry == "" then return 0 end
+        local count = 0
+        for _ in string.gmatch(carry, "[^,]+") do count = count + 1 end
+        return count
+    elseif typeof(carry) == "number" then
+        return carry
+    end
+    return countCarriedAboveHead()
 end
+
 
 -- Roman: gunakan hitungan EraCarry dari server sebagai sumber utama.
 -- Ini menghindari hitungan palsu dari model/HUD lama setelah setor.
@@ -488,13 +498,25 @@ local selectedEras = {
     ["80s Arcade"]   = true,
 }
 
+-- Rotasi target per jam berdasarkan UTC:
+-- 01 Future, 02 Roman, 03 Jurassic, 04 IceAge, 05 Eighties, lalu berulang.
+local HOURLY_UTC_ERAS = {"Future", "Roman", "Jurassic", "IceAge", "Eighties"}
+
+local function getHourlyTargetEra(timestamp)
+    local utc = os.date("!*t", timestamp or Workspace:GetServerTimeNow())
+    local slot = ((utc.hour + 4) % #HOURLY_UTC_ERAS) + 1
+    return HOURLY_UTC_ERAS[slot], utc.hour
+end
+
 local function isEraSelected(eraInternalName)
     local displayName = ERA_DISPLAY_NAMES[eraInternalName]
-    if displayName and selectedEras[displayName] then
-        return true
+    if not displayName or not selectedEras[displayName] then
+        return false
     end
-    return false
+    local targetEra = getHourlyTargetEra(Workspace:GetServerTimeNow())
+    return eraInternalName == targetEra
 end
+
 
 -- Status UI Element
 local statusParagraph = EraTripTab:Paragraph({
@@ -513,14 +535,9 @@ task.spawn(function()
                 local endsAt = Workspace:GetAttribute("EraTripEndsAt") or Workspace:GetServerTimeNow()
                 local now = Workspace:GetServerTimeNow()
 
-                -- Predict next era
-                local nextEraName = "Belum Diketahui"
-                if eraTripData and eraTripData.EraAt then
-                    pcall(function()
-                        local rawNext = eraTripData.EraAt(nextAt)
-                        nextEraName = ERA_DISPLAY_NAMES[rawNext] or rawNext or "Belum Diketahui"
-                    end)
-                end
+                -- Target otomatis mengikuti rotasi per jam UTC.
+                local nextRaw = getHourlyTargetEra(nextAt)
+                local nextEraName = ERA_DISPLAY_NAMES[nextRaw] or nextRaw or "Belum Diketahui"
 
                 if state == "Open" then
                     local remain = math.max(0, math.floor(endsAt - now))
@@ -573,54 +590,26 @@ local scheduleListParagraph = ScheduleTab:Paragraph({
 })
 
 local function buildScheduleText()
-    if not eraTripData or not eraTripData.EraAt then
-        return "Data jadwal tidak tersedia.\n(eraTripData.EraAt tidak ditemukan)"
-    end
-    
     local now = Workspace:GetServerTimeNow()
-    local nextAt = Workspace:GetAttribute("EraTripNextAt") or (now + 600)
-    local state  = Workspace:GetAttribute("EraTripState") or "Closed"
-    local curEra = Workspace:GetAttribute("EraTripEra") or ""
-    local endsAt = Workspace:GetAttribute("EraTripEndsAt") or now
-    
-    local ERA_INTERVAL_EST = 660  -- ~10 menit event + ~1 menit jeda rolling
-    local HOURS_24 = 86400
-    
-    local lines = {}
-    local lineCount = 0
-    local maxLines = 25
-    
-    -- Tambahkan event yang sedang berjalan
-    if state == "Open" and curEra ~= "" then
-        local remain = math.max(0, math.floor(endsAt - now))
-        local icon = ERA_ICONS[curEra] or "⭐"
-        local displayName = ERA_DISPLAY_NAMES[curEra] or curEra
-        table.insert(lines, string.format("▶ SEKARANG  %s %s (sisa %dm %02ds)", icon, displayName, math.floor(remain/60), remain%60))
-        lineCount = lineCount + 1
+    local hourStart = math.floor(now / 3600) * 3600
+    local lines = {
+        "Rotasi target otomatis setiap jam (UTC):",
+        "01 Future → 02 Roman → 03 Jurassic → 04 IceAge → 05 80s Arcade → ulang",
+        ""
+    }
+
+    for i = 0, 23 do
+        local slotTime = hourStart + (i * 3600)
+        local eraRaw, hour = getHourlyTargetEra(slotTime)
+        local displayName = ERA_DISPLAY_NAMES[eraRaw] or eraRaw
+        local icon = ERA_ICONS[eraRaw] or "⭐"
+        local marker = (i == 0) and "▶ " or "  "
+        table.insert(lines, string.format("%s%02d:00 UTC  %s %s", marker, hour, icon, displayName))
     end
-    
-    -- Iterasi event ke depan
-    local checkTime = nextAt
-    while checkTime < (now + HOURS_24) and lineCount < maxLines do
-        local eraRaw = nil
-        pcall(function() eraRaw = eraTripData.EraAt(checkTime) end)
-        
-        if eraRaw then
-            local icon = ERA_ICONS[eraRaw] or "⭐"
-            local displayName = ERA_DISPLAY_NAMES[eraRaw] or eraRaw
-            local diffSec = math.floor(checkTime - now)
-            local h = math.floor(diffSec / 3600)
-            local m = math.floor((diffSec % 3600) / 60)
-            local timeStr = h > 0 and string.format("+%dj %02dm", h, m) or string.format("+%dm", m)
-            table.insert(lines, string.format("  %-9s %s %s", timeStr, icon, displayName))
-            lineCount = lineCount + 1
-        end
-        checkTime = checkTime + ERA_INTERVAL_EST
-    end
-    
-    if #lines == 0 then return "Tidak ada data jadwal yang tersedia." end
+
     return table.concat(lines, "\n")
 end
+
 
 local function buildScheduleHeader()
     local now = Workspace:GetServerTimeNow()
@@ -961,44 +950,50 @@ end
 
 local function collectFutureCrates(checkLimit)
     local collectedAny = false
-    local crates = getSciCrates() -- Sudah di-sort prioritas rarity tertinggi
+    local crates = getSciCrates() -- Tier tertinggi tetap diprioritaskan
     local targetCap = 10
-    
+
     for _, crate in ipairs(crates) do
         if not autoEraTripEnabled or not isInEra("Future") then break end
-        
-        local curCount, maxFromHUD = getCarriedCratesCount()
+
+        local curCount = getFutureCarriedCount()
+        local _, maxFromHUD = getCarriedCratesCount()
         local cap = maxFromHUD or targetCap
-        if checkLimit and curCount >= cap then
-            break
-        end
-        
+        if checkLimit and curCount >= cap then break end
         if not crate.Parent then continue end
-        
+
         local cratePos = crate:GetPivot().Position
-        -- TP tepat ke crate di tanah
         safePivotTo(CFrame.new(cratePos.X, cratePos.Y + 1.5, cratePos.Z))
-        
-        -- Tunggu sampai crate diambil: crate di-destroy server ATAU count bertambah
-        local deadline = os.clock() + 0.5
-        while os.clock() < deadline and crate.Parent do
-            local newCount = getCarriedCratesCount()
-            if newCount > curCount or newCount >= cap then
+
+        -- Konfirmasi pickup lebih cepat; jangan anggap berhasil jika crate masih ada
+        -- dan jumlah carry belum bertambah.
+        local deadline = os.clock() + 0.28
+        local pickedUp = false
+        while os.clock() < deadline do
+            local newCount = getFutureCarriedCount()
+            if newCount > curCount or not crate.Parent then
+                pickedUp = true
                 break
             end
+            if checkLimit and newCount >= cap then
+                pickedUp = true
+                break
+            end
+            task.wait(0.03)
+        end
+
+        if pickedUp then
+            collectedAny = true
+        else
             task.wait(0.05)
         end
-        
-        collectedAny = true
-        
-        local nowCount = getCarriedCratesCount()
-        if checkLimit and nowCount >= cap then
-            break
-        end
+
+        if checkLimit and getFutureCarriedCount() >= cap then break end
     end
-    
+
     return collectedAny
 end
+
 
 -- Satu jalur setor Future: trigger prompt, tunggu konfirmasi, lalu kembali KickReady.
 local function depositFuture()
@@ -1076,7 +1071,10 @@ local function handleFutureEra()
                 
                 if root and targetRobot.Parent then
                     local robotPos = root.Position
-                    local safeCF = CFrame.new(robotPos.X, robotPos.Y + 12, robotPos.Z + 18)
+                    -- Berdiri di belakang robot dan lebih tinggi, bukan di jalur serangan depan.
+                    local retreatDir = -root.CFrame.LookVector
+                    local safePos = robotPos + (retreatDir * 26) + Vector3.new(0, 18, 0)
+                    local safeCF = CFrame.lookAt(safePos, robotPos)
                     safePivotTo(safeCF)
                     
                     -- Spam tembakan ke robot, sambil cek carry limit setiap tembakan
@@ -1400,16 +1398,41 @@ local function getActiveEggsInNest(nest)
 end
 
 local function depositJurassic()
-    -- 1. TP ke EraCollect untuk menetaskan telur
     safePivotTo(JURASSIC_COLLECT_CF)
-    local depositStart = os.clock()
-    while getCarriedEggsCount() > 0 and os.clock() - depositStart < 3.5 do
-        task.wait(0.2)
+    task.wait(0.2)
+
+    local function triggerCollectPrompt()
+        local eraTrip = Workspace:FindFirstChild("EraTrip")
+        local jurassic = eraTrip and eraTrip:FindFirstChild("Jurassic")
+        local collectPart = jurassic and jurassic:FindFirstChild("EraCollect")
+        local prompt = collectPart and collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if prompt and prompt.Enabled then
+            pcall(function() fireproximityprompt(prompt) end)
+            return true
+        end
+        return false
     end
-    task.wait(0.3)
+
+    triggerCollectPrompt()
+    local deadline = os.clock() + 3.0
+    while getCarriedEggsCount() > 0 and os.clock() < deadline do
+        task.wait(0.12)
+    end
+
+    if getCarriedEggsCount() > 0 then
+        triggerCollectPrompt()
+        local retryDeadline = os.clock() + 2.0
+        while getCarriedEggsCount() > 0 and os.clock() < retryDeadline do
+            task.wait(0.12)
+        end
+    end
+
+    -- Jangan biarkan automation tertahan di EraCollect; kembali dan loop lagi.
     safePivotTo(JURASSIC_KICK_READY_CF)
-    task.wait(0.3)
+    task.wait(0.25)
+    return getCarriedEggsCount() == 0
 end
+
 
 -- ================= ICEAGE ERA SCANNING & AUTOMATION =================
 
@@ -1564,165 +1587,137 @@ end
 
 -- ================= MAIN JURASSIC ROUTINE =================
 local function handleJurassicEra()
-    -- Helper: wait until chaser is far enough or move to safe spot
     local function waitForChaserSafe(targetPos, safeDist)
-        local eraTripFolder = Workspace:FindFirstChild("EraTrip")
-        local jurassicFolder = eraTripFolder and eraTripFolder:FindFirstChild("Jurassic")
-        local chaser = jurassicFolder and jurassicFolder:FindFirstChild("Chaser")
-        if not chaser then return true end
-        local maxWait = 8  -- seconds, to avoid infinite loop
         local start = os.clock()
-        while os.clock() - start < maxWait do
-            local dist = (targetPos - chaser:GetPivot().Position).Magnitude
-            if dist >= safeDist then return true end
-            -- if too close, temporarily retreat to KickReady
+        while os.clock() - start < 6 do
+            if not autoEraTripEnabled or not isInEra("Jurassic")
+                or Workspace:GetAttribute("EraTripState") ~= "Open" then
+                return false
+            end
+
+            local eraTripFolder = Workspace:FindFirstChild("EraTrip")
+            local jurassicFolder = eraTripFolder and eraTripFolder:FindFirstChild("Jurassic")
+            local chaser = jurassicFolder and jurassicFolder:FindFirstChild("Chaser")
+            if not chaser then return true end
+
+            local ok, chaserPos = pcall(function()
+                return chaser:GetPivot().Position
+            end)
+            if not ok or (targetPos - chaserPos).Magnitude >= safeDist then
+                return true
+            end
+
             safePivotTo(JURASSIC_KICK_READY_CF)
-            task.wait(0.5)
+            task.wait(0.35)
         end
         return false
     end
 
-    -- Initialize: teleport to KickReady
     safePivotTo(JURASSIC_KICK_READY_CF)
-    task.wait(0.5)
+    task.wait(0.35)
 
-    local maxCap = 1  -- Ambil 1 telur langsung collect
-    local nestsVisited = {}
-    local CHASER_SAFE_DIST = 20  -- jarak minimal yang dianggap aman (stud)
+    local maxCap = 1
+    local CHASER_SAFE_DIST = 20
+    local myGen = autoEraTripGeneration
 
-    while autoEraTripEnabled and isInEra("Jurassic") do
-        -- Jika masih ada telur yang terbawa, langsung setor ke EraCollect dulu
+    while autoEraTripEnabled and autoEraTripGeneration == myGen
+        and isInEra("Jurassic") and Workspace:GetAttribute("EraTripState") == "Open" do
+
         if getCarriedEggsCount() > 0 then
-            safePivotTo(JURASSIC_COLLECT_CF)
-            local depositStart = os.clock()
-            while getCarriedEggsCount() > 0 and os.clock() - depositStart < 3.5 do
-                task.wait(0.2)
-            end
-            task.wait(0.3)
-            safePivotTo(JURASSIC_KICK_READY_CF)
-            task.wait(0.4)
+            depositJurassic()
         end
+
         local nests = getJurassicNests()
         local character = player.Character
         local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 
-        -- getJurassicNests mengembalikan Model Nest secara langsung.
         table.sort(nests, function(a, b)
             local tierA = a:GetAttribute("Tier") or 1
             local tierB = b:GetAttribute("Tier") or 1
-            if tierA ~= tierB then
-                return tierA > tierB
-            end
-
+            if tierA ~= tierB then return tierA > tierB end
             if not rootPart then return a.Name < b.Name end
-            return (a:GetPivot().Position - rootPart.Position).Magnitude <
-                   (b:GetPivot().Position - rootPart.Position).Magnitude
+            return (a:GetPivot().Position - rootPart.Position).Magnitude
+                < (b:GetPivot().Position - rootPart.Position).Magnitude
         end)
 
-        local safeNests = {}
-        local unsafeNests = {}
-        local eraTripFolder = Workspace:FindFirstChild("EraTrip")
-        local jurassicFolder = eraTripFolder and eraTripFolder:FindFirstChild("Jurassic")
-        local chaser = jurassicFolder and jurassicFolder:FindFirstChild("Chaser")
+        local collectedThisPass = false
 
         for _, nest in ipairs(nests) do
-            if nestsVisited[nest] then continue end
-            local distToChaser = chaser and
-                (nest:GetPivot().Position - chaser:GetPivot().Position).Magnitude or math.huge
-
-            if distToChaser >= CHASER_SAFE_DIST then
-                table.insert(safeNests, nest)
-            else
-                table.insert(unsafeNests, {obj = nest, dist = distToChaser})
+            if not autoEraTripEnabled or autoEraTripGeneration ~= myGen
+                or not isInEra("Jurassic")
+                or Workspace:GetAttribute("EraTripState") ~= "Open" then
+                break
             end
-        end
-
-        local processingList = {}
-        if #safeNests > 0 then
-            processingList = safeNests
-        else
-            table.sort(unsafeNests, function(a, b) return a.dist > b.dist end)
-            for _, item in ipairs(unsafeNests) do
-                table.insert(processingList, item.obj)
-            end
-        end
-
-        for _, nest in ipairs(processingList) do
-            if not autoEraTripEnabled or not isInEra("Jurassic") then break end
+            if not nest.Parent then continue end
 
             local nestPos = nest:GetPivot().Position
-            local safe = waitForChaserSafe(nestPos, CHASER_SAFE_DIST)
-            if not safe then continue end
+            if not waitForChaserSafe(nestPos, CHASER_SAFE_DIST) then
+                continue
+            end
 
-            -- Cari semua telur aktif di dalam sarang ini (prompt StealEgg yang Enabled)
             local activePrompts = {}
             for _, desc in ipairs(nest:GetDescendants()) do
-                if desc:IsA("ProximityPrompt") and desc.Enabled and (desc.Name == "StealEgg" or desc.ActionText == "Steal") then
+                if desc:IsA("ProximityPrompt") and desc.Enabled
+                    and (desc.Name == "StealEgg" or desc.ActionText == "Steal") then
                     table.insert(activePrompts, desc)
                 end
             end
 
-            -- Jika tidak ada telur aktif di nest ini, tandai sudah dikunjungi dan lewati
-            if #activePrompts == 0 then
-                nestsVisited[nest] = true
-                continue
-            end
-
+            -- Nest kosong dilewati; lanjut cek nest berikutnya.
             for _, prompt in ipairs(activePrompts) do
-                if not autoEraTripEnabled or not isInEra("Jurassic") then break end
                 if getCarriedEggsCount() >= maxCap then break end
-                if not prompt.Enabled or not prompt.Parent then continue end
+                if not prompt.Parent or not prompt.Enabled then continue end
 
-                -- Teleport tepat ke telur (part Egg1)
-                local eggPart = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
+                local eggPart = prompt.Parent:IsA("BasePart") and prompt.Parent
+                    or prompt.Parent:FindFirstChildWhichIsA("BasePart")
                 local targetPos = eggPart and eggPart.Position or nestPos
+
+                if not waitForChaserSafe(targetPos, CHASER_SAFE_DIST) then
+                    continue
+                end
+
                 safePivotTo(CFrame.new(targetPos.X, targetPos.Y + 1.2, targetPos.Z))
-                task.wait(0.15)
+                task.wait(0.12)
 
-                -- Tangani hold duration (0.7 detik)
-                local hold = prompt.HoldDuration or 0.7
-                pcall(function()
-                    prompt.HoldDuration = 0
-                end)
-                pcall(function()
-                    fireproximityprompt(prompt)
-                end)
-                -- Berikan jeda waktu hold duration agar server menyelesaikan steal
-                task.wait(math.max(0.75, hold + 0.1))
+                local oldHold = prompt.HoldDuration
+                pcall(function() prompt.HoldDuration = 0 end)
+                pcall(function() fireproximityprompt(prompt) end)
+                task.wait(0.2)
+                if oldHold ~= nil and prompt.Parent then
+                    pcall(function() prompt.HoldDuration = oldHold end)
+                end
 
-                -- Tunggu hingga telur terambil
-                -- Begitu ambil 1 telur langsung setor ke EraCollect!
+                local pickupDeadline = os.clock() + 1.2
+                while os.clock() < pickupDeadline and getCarriedEggsCount() < maxCap do
+                    task.wait(0.08)
+                end
+
                 if getCarriedEggsCount() >= maxCap then
-                    local collectPos = JURASSIC_COLLECT_CF.Position
-                    waitForChaserSafe(collectPos, CHASER_SAFE_DIST)
-
-                    -- Deposit ke EraCollect (hatch otomatis ketika pemain berada di EraCollect)
-                    safePivotTo(JURASSIC_COLLECT_CF)
-                    local depositStart = os.clock()
-                    while getCarriedEggsCount() > 0 and os.clock() - depositStart < 3.5 do
-                        task.wait(0.2)
-                    end
-                    task.wait(0.3)
-
-                    -- Kembali ke KickReady untuk lanjut ambil telur berikutnya
-                    safePivotTo(JURASSIC_KICK_READY_CF)
-                    task.wait(0.4)
+                    collectedThisPass = true
+                    depositJurassic()
                     break
                 end
             end
 
-            -- Begitu 1 telur disetor, langsung break loop sarang untuk scan ulang sarang tertinggi berikutnya!
-            break
+            if collectedThisPass then break end
         end
 
-        -- Mampir ke Trader HANYA di menit ke-9 (sisa <= 65s) selama 1 detik untuk borong craft
-        checkFinalMinuteTraderCraft("Jurassic", "JurassicMythic", canCraftJurassicMythic, JURASSIC_TRADER_CF, JURASSIC_KICK_READY_CF)
+        if not collectedThisPass then
+            -- Belum ada telur aktif: tunggu sebentar lalu scan ulang semua nest.
+            safePivotTo(JURASSIC_KICK_READY_CF)
+            task.wait(0.55)
+        end
 
-        task.wait(0.3)
+        checkFinalMinuteTraderCraft(
+            "Jurassic", "JurassicMythic", canCraftJurassicMythic,
+            JURASSIC_TRADER_CF, JURASSIC_KICK_READY_CF
+        )
+        task.wait(0.15)
     end
 
-    statusParagraph:SetDesc("Jurassic selesai – semua telur terkumpul atau tidak ada lagi yang dapat diambil.")
+    statusParagraph:SetDesc("Jurassic selesai.")
 end
+
 
 -- ================= 80s ARCADE DANCE-OFF AUTOMATION =================
 local EightiesClient = nil
