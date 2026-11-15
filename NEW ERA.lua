@@ -241,8 +241,14 @@ local function countFromHUD()
     local playerGui = player:FindFirstChild("PlayerGui")
     local haulHUD = playerGui and playerGui:FindFirstChild("EraHaulHUD")
     if haulHUD then
+        -- Cek Pill/Frame container: kalau Visible = false, HUD hidden (sudah deposit)
+        -- Jangan percaya teks yang tertinggal saat HUD tidak tampil
+        local pill = haulHUD:FindFirstChild("Pill", true) or haulHUD:FindFirstChild("Frame", true)
+        if pill and not pill.Visible then
+            return 0, nil
+        end
         for _, desc in ipairs(haulHUD:GetDescendants()) do
-            if desc:IsA("TextLabel") and desc.Text and desc.Text ~= "" then
+            if desc:IsA("TextLabel") and desc.Visible and desc.Text and desc.Text ~= "" then
                 local cur, maxVal = string.match(desc.Text, "HAUL%s*(%d+)%s*/%s*(%d+)")
                 if cur then
                     return tonumber(cur), tonumber(maxVal)
@@ -250,11 +256,11 @@ local function countFromHUD()
             end
         end
     end
-    return nil, nil
+    return 0, nil
 end
 
 local function getCarriedCratesCount()
-    -- 1. Deteksi dari attribute EraCarry (server-side)
+    -- 1. PRIORITAS UTAMA: attribute EraCarry dari server (paling akurat)
     local countAttr = 0
     local carry = player:GetAttribute("EraCarry")
     if typeof(carry) == "string" and carry ~= "" then
@@ -265,14 +271,15 @@ local function getCarriedCratesCount()
         countAttr = carry
     end
     
-    -- 2. Deteksi fisik: hitung model CarriedCrate yang melayang di atas kepala kita
+    -- 2. Fallback: hitung model CarriedCrate di atas kepala
     local countHead = countCarriedAboveHead()
     
-    -- 3. Deteksi GUI: baca teks HUD "HAUL X/Y"
-    local countHUD, maxFromHUD = countFromHUD()
+    -- 3. HUD: HANYA untuk maxCapacity, TIDAK untuk current count
+    --    (HUD sering stuck di nilai lama setelah deposit)
+    local _, maxFromHUD = countFromHUD()
     
-    -- Ambil nilai terbesar yang terdeteksi
-    local finalCount = math.max(countAttr, countHead, countHUD or 0)
+    -- Pakai attribute (server truth) + fallback head, BUKAN HUD count
+    local finalCount = math.max(countAttr, countHead)
     return finalCount, maxFromHUD
 end
 
@@ -280,6 +287,42 @@ end
 -- Wrapper ini mencegah pemanggilan fungsi yang sebelumnya belum didefinisikan.
 local function getCarriedEggsCount()
     return getCarriedCratesCount()
+end
+
+-- Roman: gunakan hitungan EraCarry dari server sebagai sumber utama.
+-- Ini menghindari hitungan palsu dari model/HUD lama setelah setor.
+local function getRomanCarriedCount()
+    local carry = player:GetAttribute("EraCarry")
+    if typeof(carry) == "string" then
+        local count = 0
+        for _ in string.gmatch(carry, "[^,]+") do
+            count = count + 1
+        end
+        return count
+    elseif typeof(carry) == "number" then
+        return carry
+    end
+
+    local countHUD = countFromHUD()
+    if countHUD ~= nil then
+        return countHUD
+    end
+    return countCarriedAboveHead()
+end
+
+-- Future: gunakan EraCarry server terlebih dahulu agar hitungan HUD/model lama
+-- setelah setor tidak memicu teleport EraCollect berulang.
+local function getFutureCarriedCount()
+    local carry = player:GetAttribute("EraCarry")
+    if typeof(carry) == "string" and carry ~= "" then
+        local count = 0
+        for _ in string.gmatch(carry, "[^,]+") do count = count + 1 end
+        return count
+    elseif typeof(carry) == "number" then
+        return carry
+    end
+    -- Fallback fisik saja, TIDAK pakai HUD (HUD bisa stuck setelah deposit)
+    return countCarriedAboveHead()
 end
 
 local function getAllRelics()
@@ -459,24 +502,16 @@ local statusParagraph = EraTripTab:Paragraph({
     Content = "Memuat status...",
 })
 
--- Dedicated loop to update status: "Next event apa & berapa menit lagi" (Tiap 1 Jam / Hourly)
+-- Dedicated loop to update status: "Next event apa & berapa menit lagi"
 task.spawn(function()
     while true do
         pcall(function()
             if statusParagraph then
                 local state = Workspace:GetAttribute("EraTripState") or "Closed"
                 local curEra = Workspace:GetAttribute("EraTripEra") or "None"
+                local nextAt = Workspace:GetAttribute("EraTripNextAt") or (Workspace:GetServerTimeNow() + 3600)
                 local endsAt = Workspace:GetAttribute("EraTripEndsAt") or Workspace:GetServerTimeNow()
                 local now = Workspace:GetServerTimeNow()
-
-                -- Hitung jadwal pergantian event: tiap jam pas (3600 detik)
-                local currentHourBase = math.floor(now / 3600) * 3600
-                local nextHourBase = currentHourBase + 3600
-                local nextAtAttr = Workspace:GetAttribute("EraTripNextAt")
-                local nextAt = nextHourBase
-                if nextAtAttr and nextAtAttr > now and math.abs(nextAtAttr - nextHourBase) <= 1800 then
-                    nextAt = nextAtAttr
-                end
 
                 -- Predict next era
                 local nextEraName = "Belum Diketahui"
@@ -487,29 +522,29 @@ task.spawn(function()
                     end)
                 end
 
-                local nextHourLabel = os.date("%H:00", nextAt)
-                local nextDiff = math.max(0, math.floor(nextAt - now))
-                local nextMins = math.floor(nextDiff / 60)
-                local nextSecs = nextDiff % 60
-
                 if state == "Open" then
                     local remain = math.max(0, math.floor(endsAt - now))
                     local curDisplayName = ERA_DISPLAY_NAMES[curEra] or curEra
+                    local nextDiff = math.max(0, math.floor(nextAt - now))
+                    local nextMins = math.floor(nextDiff / 60)
                     
                     statusParagraph:SetDesc(string.format(
-                        "Event Aktif: %s (Sisa %02d:%02d)\nNext Event: %s jam %s (dalam %d menit)",
-                        curDisplayName, math.floor(remain / 60), remain % 60, nextEraName, nextHourLabel, nextMins
+                        "Event Aktif: %s (Sisa %02d:%02d)\nNext Event: %s (dalam %d menit)",
+                        curDisplayName, math.floor(remain / 60), remain % 60, nextEraName, nextMins
                     ))
                 elseif state == "Rolling" then
                     local curDisplayName = ERA_DISPLAY_NAMES[curEra] or curEra
                     statusParagraph:SetDesc(string.format(
-                        "Sedang Rolling Event: %s...\nNext Event: %s jam %s",
-                        curDisplayName, nextEraName, nextHourLabel
+                        "Sedang Rolling Event: %s...\nNext Event: %s",
+                        curDisplayName, nextEraName
                     ))
                 else
+                    local diff = math.max(0, math.floor(nextAt - now))
+                    local mins = math.floor(diff / 60)
+                    local secs = diff % 60
                     statusParagraph:SetDesc(string.format(
-                        "Next Event: %s jam %s (%d menit %02d detik lagi)",
-                        nextEraName, nextHourLabel, nextMins, nextSecs
+                        "Next Event: %s (%d menit %02d detik lagi)",
+                        nextEraName, mins, secs
                     ))
                 end
             end
@@ -519,7 +554,6 @@ task.spawn(function()
 end)
 
 -- ================= TAB: JADWAL (SCHEDULE 24 JAM) =================
--- ERA icon mapping untuk tampilan
 local ERA_ICONS = {
     ["Future"]   = "🤖",
     ["IceAge"]   = "🧊",
@@ -528,7 +562,6 @@ local ERA_ICONS = {
     ["Eighties"] = "🕹️",
 }
 
--- Paragraphs untuk jadwal
 local scheduleHeaderParagraph = ScheduleTab:Paragraph({
     Title = "📅 Jadwal Event 24 Jam Ke Depan",
     Content = "Memuat jadwal...",
@@ -539,76 +572,56 @@ local scheduleListParagraph = ScheduleTab:Paragraph({
     Content = "Menghitung...",
 })
 
--- Build schedule string untuk 24 jam ke depan (tiap 1 jam / hourly)
 local function buildScheduleText()
     if not eraTripData or not eraTripData.EraAt then
         return "Data jadwal tidak tersedia.\n(eraTripData.EraAt tidak ditemukan)"
     end
     
     local now = Workspace:GetServerTimeNow()
+    local nextAt = Workspace:GetAttribute("EraTripNextAt") or (now + 600)
     local state  = Workspace:GetAttribute("EraTripState") or "Closed"
     local curEra = Workspace:GetAttribute("EraTripEra") or ""
     local endsAt = Workspace:GetAttribute("EraTripEndsAt") or now
-    local nextAtAttr = Workspace:GetAttribute("EraTripNextAt")
     
-    -- Hitung patokan jam berikutnya (event EraTrip selalu berganti tiap 1 jam / 3600 detik)
-    local currentHourBase = math.floor(now / 3600) * 3600
-    local nextHourBase = currentHourBase + 3600
-    local nextAt = nextHourBase
-    if nextAtAttr and nextAtAttr > now and math.abs(nextAtAttr - nextHourBase) <= 1800 then
-        nextAt = nextAtAttr
-    end
+    local ERA_INTERVAL_EST = 660  -- ~10 menit event + ~1 menit jeda rolling
+    local HOURS_24 = 86400
     
     local lines = {}
+    local lineCount = 0
+    local maxLines = 25
     
-    -- Tambahkan event yang sedang berjalan jika ada
+    -- Tambahkan event yang sedang berjalan
     if state == "Open" and curEra ~= "" then
         local remain = math.max(0, math.floor(endsAt - now))
         local icon = ERA_ICONS[curEra] or "⭐"
         local displayName = ERA_DISPLAY_NAMES[curEra] or curEra
-        local jamNow = os.date("%H:%M", now)
-        table.insert(lines, string.format("▶ SEKARANG [%s] %s %s (sisa %dm %02ds)", jamNow, icon, displayName, math.floor(remain/60), remain%60))
+        table.insert(lines, string.format("▶ SEKARANG  %s %s (sisa %dm %02ds)", icon, displayName, math.floor(remain/60), remain%60))
+        lineCount = lineCount + 1
     end
     
-    -- Iterasi event ke depan per jam (step 3600 detik) selama 24 jam
+    -- Iterasi event ke depan
     local checkTime = nextAt
-    for i = 0, 23 do
+    while checkTime < (now + HOURS_24) and lineCount < maxLines do
         local eraRaw = nil
-        pcall(function()
-            eraRaw = eraTripData.EraAt(checkTime)
-        end)
+        pcall(function() eraRaw = eraTripData.EraAt(checkTime) end)
         
         if eraRaw then
             local icon = ERA_ICONS[eraRaw] or "⭐"
             local displayName = ERA_DISPLAY_NAMES[eraRaw] or eraRaw
-            local diffSec = math.max(0, math.floor(checkTime - now))
+            local diffSec = math.floor(checkTime - now)
             local h = math.floor(diffSec / 3600)
             local m = math.floor((diffSec % 3600) / 60)
-            
-            local timeLabel = os.date("%H:00", checkTime)
-            local diffLabel = ""
-            if h > 0 and m > 0 then
-                diffLabel = string.format("(+%dj %02dm lagi)", h, m)
-            elseif h > 0 then
-                diffLabel = string.format("(+%dj lagi)", h)
-            else
-                diffLabel = string.format("(%dm lagi)", m)
-            end
-            
-            table.insert(lines, string.format("  [%s] %s %-16s %s", timeLabel, icon, displayName, diffLabel))
+            local timeStr = h > 0 and string.format("+%dj %02dm", h, m) or string.format("+%dm", m)
+            table.insert(lines, string.format("  %-9s %s %s", timeStr, icon, displayName))
+            lineCount = lineCount + 1
         end
-        
-        checkTime = checkTime + 3600
+        checkTime = checkTime + ERA_INTERVAL_EST
     end
     
-    if #lines == 0 then
-        return "Tidak ada data jadwal yang tersedia."
-    end
-    
+    if #lines == 0 then return "Tidak ada data jadwal yang tersedia." end
     return table.concat(lines, "\n")
 end
 
--- Header paragraph: tampilkan waktu server sekarang
 local function buildScheduleHeader()
     local now = Workspace:GetServerTimeNow()
     local state = Workspace:GetAttribute("EraTripState") or "Closed"
@@ -616,62 +629,55 @@ local function buildScheduleHeader()
     return string.format("Status: %s\nWaktu Server: %.0f", stateStr, now)
 end
 
--- Update loop jadwal (setiap 5 detik)
 task.spawn(function()
     while true do
         pcall(function()
-            if scheduleHeaderParagraph then
-                scheduleHeaderParagraph:SetDesc(buildScheduleHeader())
-            end
-            if scheduleListParagraph then
-                scheduleListParagraph:SetDesc(buildScheduleText())
-            end
+            if scheduleHeaderParagraph then scheduleHeaderParagraph:SetDesc(buildScheduleHeader()) end
+            if scheduleListParagraph then scheduleListParagraph:SetDesc(buildScheduleText()) end
         end)
         task.wait(5)
     end
 end)
 
 -- ================= TAB: INVENTARIS =================
--- Item label: key relic → nama tampilan (urutan: highest rarity dulu)
 local ITEM_DISPLAY = {
     -- The Future
-    { key = "Future5", label = "Quantum Chip",   era = "Future",   icon = "🤖", cost = 1  },
-    { key = "Future4", label = "Plasma Core",    era = "Future",   icon = "🤖", cost = 7  },
-    { key = "Future3", label = "Laser Goggles",  era = "Future",   icon = "🤖", cost = 14 },
-    { key = "Future2", label = "Robot Scraps",   era = "Future",   icon = "🤖", cost = 25 },
-    { key = "Future1", label = "Scrap Metal",    era = "Future",   icon = "🤖", cost = 45 },
+    { key = "Future5",   label = "Quantum Chip",   era = "Future",   cost = 1  },
+    { key = "Future4",   label = "Plasma Core",    era = "Future",   cost = 7  },
+    { key = "Future3",   label = "Laser Goggles",  era = "Future",   cost = 14 },
+    { key = "Future2",   label = "Robot Scraps",   era = "Future",   cost = 25 },
+    { key = "Future1",   label = "Scrap Metal",    era = "Future",   cost = 45 },
     -- Roman Empire
-    { key = "Roman5",  label = "Caesar Seal",    era = "Roman",    icon = "⚔️", cost = 1  },
-    { key = "Roman4",  label = "Golden Eagle",   era = "Roman",    icon = "⚔️", cost = 7  },
-    { key = "Roman3",  label = "Centurion Helm", era = "Roman",    icon = "⚔️", cost = 14 },
-    { key = "Roman2",  label = "Laurel Wreath",  era = "Roman",    icon = "⚔️", cost = 25 },
-    { key = "Roman1",  label = "Bronze Coin",    era = "Roman",    icon = "⚔️", cost = 45 },
+    { key = "Roman5",    label = "Caesar Seal",    era = "Roman",    cost = 1  },
+    { key = "Roman4",    label = "Golden Eagle",   era = "Roman",    cost = 7  },
+    { key = "Roman3",    label = "Centurion Helm", era = "Roman",    cost = 14 },
+    { key = "Roman2",    label = "Laurel Wreath",  era = "Roman",    cost = 25 },
+    { key = "Roman1",    label = "Bronze Coin",    era = "Roman",    cost = 45 },
     -- Jurassic
-    { key = "Jurassic5", label = "Primal Egg",     era = "Jurassic", icon = "🦕", cost = 1  },
-    { key = "Jurassic4", label = "Volcano Ember",  era = "Jurassic", icon = "🦕", cost = 7  },
-    { key = "Jurassic3", label = "Fossil Skull",   era = "Jurassic", icon = "🦕", cost = 14 },
-    { key = "Jurassic2", label = "Raptor Claw",    era = "Jurassic", icon = "🦕", cost = 25 },
-    { key = "Jurassic1", label = "Amber Shard",    era = "Jurassic", icon = "🦕", cost = 45 },
+    { key = "Jurassic5", label = "Primal Egg",     era = "Jurassic", cost = 1  },
+    { key = "Jurassic4", label = "Volcano Ember",  era = "Jurassic", cost = 7  },
+    { key = "Jurassic3", label = "Fossil Skull",   era = "Jurassic", cost = 14 },
+    { key = "Jurassic2", label = "Raptor Claw",    era = "Jurassic", cost = 25 },
+    { key = "Jurassic1", label = "Amber Shard",    era = "Jurassic", cost = 45 },
     -- Ice Age
-    { key = "IceAge5", label = "Mammoth Tusk",   era = "IceAge",   icon = "🧊", cost = 1  },
-    { key = "IceAge4", label = "Frost Core",     era = "IceAge",   icon = "🧊", cost = 7  },
-    { key = "IceAge3", label = "Glacial Tooth",  era = "IceAge",   icon = "🧊", cost = 14 },
-    { key = "IceAge2", label = "Ice Shard",      era = "IceAge",   icon = "🧊", cost = 25 },
-    { key = "IceAge1", label = "Frozen Pebble",  era = "IceAge",   icon = "🧊", cost = 45 },
-    -- 80s Arcade (tidak ada craft mythic, tapi punya item sendiri)
-    { key = "Eighties5", label = "Gold Record",    era = "Eighties", icon = "🕹️", cost = 1  },
-    { key = "Eighties4", label = "Neon Sign",      era = "Eighties", icon = "🕹️", cost = 7  },
-    { key = "Eighties3", label = "Cassette Tape",  era = "Eighties", icon = "🕹️", cost = 14 },
-    { key = "Eighties2", label = "Arcade Token",   era = "Eighties", icon = "🕹️", cost = 25 },
-    { key = "Eighties1", label = "Quarter Coin",   era = "Eighties", icon = "🕹️", cost = 45 },
+    { key = "IceAge5",   label = "Mammoth Tusk",   era = "IceAge",   cost = 1  },
+    { key = "IceAge4",   label = "Frost Core",     era = "IceAge",   cost = 7  },
+    { key = "IceAge3",   label = "Glacial Tooth",  era = "IceAge",   cost = 14 },
+    { key = "IceAge2",   label = "Ice Shard",      era = "IceAge",   cost = 25 },
+    { key = "IceAge1",   label = "Frozen Pebble",  era = "IceAge",   cost = 45 },
+    -- 80s Arcade (tidak ada craft mythic, item nama berdasarkan kemungkinan)
+    { key = "Eighties5", label = "Gold Record",    era = "Eighties", cost = 1  },
+    { key = "Eighties4", label = "Neon Sign",      era = "Eighties", cost = 7  },
+    { key = "Eighties3", label = "Cassette Tape",  era = "Eighties", cost = 14 },
+    { key = "Eighties2", label = "Arcade Token",   era = "Eighties", cost = 25 },
+    { key = "Eighties1", label = "Quarter Coin",   era = "Eighties", cost = 45 },
 }
 
--- Paragraphs per era untuk inventaris
-local invFutureParagraph   = InventoryTab:Paragraph({ Title = "🤖 The Future",    Content = "Memuat..." })
-local invRomanParagraph    = InventoryTab:Paragraph({ Title = "⚔️ Roman Empire",  Content = "Memuat..." })
-local invJurassicParagraph = InventoryTab:Paragraph({ Title = "🦕 Jurassic",      Content = "Memuat..." })
-local invIceAgeParagraph   = InventoryTab:Paragraph({ Title = "🧊 Ice Age",       Content = "Memuat..." })
-local invEightiesParagraph = InventoryTab:Paragraph({ Title = "🕹️ 80s Arcade",   Content = "Memuat..." })
+local invFutureParagraph   = InventoryTab:Paragraph({ Title = "🤖 The Future",   Content = "Memuat..." })
+local invRomanParagraph    = InventoryTab:Paragraph({ Title = "⚔️ Roman Empire", Content = "Memuat..." })
+local invJurassicParagraph = InventoryTab:Paragraph({ Title = "🦕 Jurassic",     Content = "Memuat..." })
+local invIceAgeParagraph   = InventoryTab:Paragraph({ Title = "🧊 Ice Age",      Content = "Memuat..." })
+local invEightiesParagraph = InventoryTab:Paragraph({ Title = "🕹️ 80s Arcade",  Content = "Memuat..." })
 local invCraftParagraph    = InventoryTab:Paragraph({ Title = "⚒️ Bisa Craft Sekarang?", Content = "Mengecek..." })
 
 local INV_PARAGRAPH = {
@@ -689,17 +695,15 @@ local function buildInventoryLines(eraName)
         if item.era == eraName then
             local count = tonumber(relics[item.key]) or 0
             local needed = item.cost
-            -- Craft readiness bar: berapa kali bisa craft dari item ini saja
             local craftable = math.floor(count / needed)
-            local bar = ""
+            local bar
             if craftable >= 1 then
                 bar = " ✅ x" .. craftable
             else
-                -- Progress menuju 1 craft
                 local pct = math.floor((count / needed) * 10)
                 bar = " [" .. string.rep("█", pct) .. string.rep("░", 10 - pct) .. "]"
             end
-            table.insert(lines, string.format("%-16s %3d / %-3d%s", item.label, count, needed, bar))
+            table.insert(lines, string.format("%-16s %3d/%-3d%s", item.label, count, needed, bar))
         end
     end
     return table.concat(lines, "\n")
@@ -708,42 +712,31 @@ end
 local function buildCraftStatus()
     local relics = getAllRelics()
     local results = {}
-    
-    local function checkCraft(eraName, cost, mythicName)
+    local function checkCraft(eraInternal, cost, mythicName)
         local canCraft = true
         for key, needed in pairs(cost) do
-            local cur = tonumber(relics[key]) or 0
-            if cur < needed then canCraft = false; break end
+            if (tonumber(relics[key]) or 0) < needed then canCraft = false; break end
         end
-        local icon = ERA_ICONS[eraName] or "⭐"
-        local status = canCraft and "✅ BISA CRAFT" or "❌ Belum cukup"
-        table.insert(results, string.format("%s %-15s %s", icon, mythicName, status))
+        local icon = ERA_ICONS[eraInternal] or "⭐"
+        table.insert(results, string.format("%s %-18s %s", icon, mythicName, canCraft and "✅ BISA CRAFT" or "❌ Belum cukup"))
     end
-    
-    checkCraft("Future",   FUTURE_MYTHIC_COST,   "Mecha Pizzone")
-    checkCraft("Roman",    ROMAN_MYTHIC_COST,     "Cesarone Imper.")
-    checkCraft("Jurassic", JURASSIC_MYTHIC_COST,  "T-Rexone Bracino")
+    checkCraft("Future",   FUTURE_MYTHIC_COST,   "Mecha Pizzone 3000")
+    checkCraft("Roman",    ROMAN_MYTHIC_COST,     "Cesarone Imperatore")
+    checkCraft("Jurassic", JURASSIC_MYTHIC_COST,  "T-Rexone Braccino")
     checkCraft("IceAge",   ICEAGE_MYTHIC_COST,    "Mammutone")
-    
-    -- 80s Arcade: tidak ada mythic craft, tampilkan Gold Record count saja
+    -- 80s Arcade: tidak ada mythic craft
     local gr = tonumber(relics["Eighties5"]) or 0
-    table.insert(results, string.format("🕹️ %-15s %d Gold Record (no craft)", "80s Arcade", gr))
-    
+    table.insert(results, string.format("🕹️ %-18s %d Gold Record (no craft)", "80s Arcade", gr))
     return table.concat(results, "\n")
 end
 
--- Update loop inventaris (setiap 3 detik)
 task.spawn(function()
     while true do
         pcall(function()
             for eraName, para in pairs(INV_PARAGRAPH) do
-                if para then
-                    para:SetDesc(buildInventoryLines(eraName))
-                end
+                if para then para:SetDesc(buildInventoryLines(eraName)) end
             end
-            if invCraftParagraph then
-                invCraftParagraph:SetDesc(buildCraftStatus())
-            end
+            if invCraftParagraph then invCraftParagraph:SetDesc(buildCraftStatus()) end
         end)
         task.wait(3)
     end
@@ -756,12 +749,10 @@ EraTripTab:Toggle({
     Callback = function(state)
         autoEraTripEnabled = state
         if state then
-            -- Naikkan generation → loop lama otomatis berhenti saat di-ON ulang
+            -- Naikkan generation → loop lama yang masih jalan otomatis berhenti
             autoEraTripGeneration = autoEraTripGeneration + 1
             local myGen = autoEraTripGeneration
-            task.spawn(function()
-                runAutoEraTrip(myGen)
-            end)
+            task.spawn(function() runAutoEraTrip(myGen) end)
         else
             -- Di-OFF → naikkan generation supaya semua loop aktif langsung stop
             autoEraTripGeneration = autoEraTripGeneration + 1
@@ -985,21 +976,17 @@ local function collectFutureCrates(checkLimit)
         if not crate.Parent then continue end
         
         local cratePos = crate:GetPivot().Position
-        -- TP tepat ke crate di tanah & reset velocity agar tidak terlempar/terjeda
-        safePivotTo(CFrame.new(cratePos.X, cratePos.Y + 1.2, cratePos.Z))
-        local _, myRoot = getCharacterParts()
-        if myRoot then
-            myRoot.AssemblyLinearVelocity = Vector3.zero
-        end
+        -- TP tepat ke crate di tanah
+        safePivotTo(CFrame.new(cratePos.X, cratePos.Y + 1.5, cratePos.Z))
         
-        -- Ambil cepat: server mendeteksi pickup dalam puluhan ms
-        local deadline = os.clock() + 0.18
+        -- Tunggu sampai crate diambil: crate di-destroy server ATAU count bertambah
+        local deadline = os.clock() + 0.5
         while os.clock() < deadline and crate.Parent do
             local newCount = getCarriedCratesCount()
-            if newCount > curCount or (checkLimit and newCount >= cap) then
+            if newCount > curCount or newCount >= cap then
                 break
             end
-            task.wait(0.03)
+            task.wait(0.05)
         end
         
         collectedAny = true
@@ -1013,11 +1000,35 @@ local function collectFutureCrates(checkLimit)
     return collectedAny
 end
 
+-- Satu jalur setor Future: trigger prompt, tunggu konfirmasi, lalu kembali KickReady.
+local function depositFuture()
+    safePivotTo(FUTURE_COLLECT_CF)
+    task.wait(0.2)
+
+    local eraTrip = Workspace:FindFirstChild("EraTrip")
+    local future = eraTrip and eraTrip:FindFirstChild("Future")
+    local collectPart = future and future:FindFirstChild("EraCollect")
+    local prompt = collectPart and collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and prompt.Enabled then
+        pcall(function() fireproximityprompt(prompt) end)
+    end
+
+    local depositStart = os.clock()
+    while getFutureCarriedCount() > 0 and os.clock() - depositStart < 5 do
+        task.wait(0.2)
+    end
+    task.wait(0.3)
+    safePivotTo(FUTURE_KICK_READY_CF)
+    task.wait(0.3)
+end
+
 -- ================= MAIN FUTURE ROUTINE =================
 local function handleFutureEra()
+    local myGen = autoEraTripGeneration
     local initializedAtKickReady = false
     
-    while autoEraTripEnabled and isInEra("Future") and Workspace:GetAttribute("EraTripState") == "Open" do
+    while autoEraTripEnabled and autoEraTripGeneration == myGen
+        and isInEra("Future") and Workspace:GetAttribute("EraTripState") == "Open" do
         -- Step 1: Sekali di awal, TP ke EraKickReady, jeda 0.5s
         if not initializedAtKickReady then
             safePivotTo(FUTURE_KICK_READY_CF)
@@ -1025,30 +1036,25 @@ local function handleFutureEra()
             initializedAtKickReady = true
         end
         
-        local carried, maxFromHUD = getCarriedCratesCount()
+        local carried, maxFromHUD = getFutureCarriedCount()
         local targetCap = maxFromHUD or 10
         
         -- Step 2: Cek apakah sudah bawa 10 peti (atau penuh) -> langsung setor ke EraCollect & kembali ke KickReady
-        if carried >= targetCap then
-            safePivotTo(FUTURE_COLLECT_CF)
-            local depositStart = os.clock()
-            while getCarriedCratesCount() > 0 and os.clock() - depositStart < 3 do
-                task.wait(0.2)
-            end
-            task.wait(0.3)
-            safePivotTo(FUTURE_KICK_READY_CF)
-            task.wait(0.3)
-            -- Setelah setor, reset dan langsung mulai lagi dari Zona Tertinggi (Zone 5)!
+        -- Guard: carried > 0 mencegah infinite deposit loop saat HUD stuck di angka lama
+        if carried > 0 and carried >= targetCap then
+            depositFuture()
+            -- Setelah setor, mulai ulang dari Zone 5.
             continue
         end
         
         -- Step 3: Looting dari Zona Tertinggi ke Bawah (Zone 5 -> 1)
         for _, zone in ipairs(FUTURE_ZONES) do
-            if not autoEraTripEnabled or not isInEra("Future") or Workspace:GetAttribute("EraTripState") ~= "Open" then
+            if not autoEraTripEnabled or autoEraTripGeneration ~= myGen
+                or not isInEra("Future") or Workspace:GetAttribute("EraTripState") ~= "Open" then
                 break
             end
             
-            local currentCarried = getCarriedCratesCount()
+            local currentCarried = getFutureCarriedCount()
             if currentCarried >= targetCap then
                 break
             end
@@ -1056,11 +1062,11 @@ local function handleFutureEra()
             local zoneTimeout = os.clock() + 20
             while autoEraTripEnabled and isInEra("Future") and os.clock() < zoneTimeout do
                 -- Cek batas bawa LEBIH DULU
-                if getCarriedCratesCount() >= targetCap then break end
+                if getFutureCarriedCount() >= targetCap then break end
                 
                 -- Pungut crate dengan prioritas rarity tertinggi duluan
                 collectFutureCrates(true)
-                if getCarriedCratesCount() >= targetCap then break end
+                if getFutureCarriedCount() >= targetCap then break end
                 
                 local robots = getRobotsInZone(zone)
                 if #robots == 0 then break end
@@ -1070,29 +1076,12 @@ local function handleFutureEra()
                 
                 if root and targetRobot.Parent then
                     local robotPos = root.Position
-                    -- Melayang aman di atas & belakang jangkauan robot (Y+15, Z+16) menghadap target
-                    local safeCF = CFrame.lookAt(Vector3.new(robotPos.X, robotPos.Y + 15, robotPos.Z + 16), robotPos)
+                    local safeCF = CFrame.new(robotPos.X, robotPos.Y + 12, robotPos.Z + 18)
                     safePivotTo(safeCF)
-                    local _, initRoot = getCharacterParts()
-                    if initRoot then
-                        initRoot.AssemblyLinearVelocity = Vector3.zero
-                    end
                     
-                    -- Spam tembakan ke robot: perbarui hover & kunci velocity di tiap tembakan agar TIDAK jatuh oleh gravitasi
+                    -- Spam tembakan ke robot, sambil cek carry limit setiap tembakan
                     for _ = 1, 6 do
-                        if not autoEraTripEnabled or not targetRobot.Parent or getCarriedCratesCount() >= targetCap then break end
-                        
-                        local curRoot = targetRobot:FindFirstChild("RootPart") or targetRobot.PrimaryPart
-                        if curRoot then
-                            local rPos = curRoot.Position
-                            local hoverCF = CFrame.lookAt(Vector3.new(rPos.X, rPos.Y + 15, rPos.Z + 16), rPos)
-                            safePivotTo(hoverCF)
-                            local _, myRoot = getCharacterParts()
-                            if myRoot then
-                                myRoot.AssemblyLinearVelocity = Vector3.zero
-                            end
-                        end
-                        
+                        if not autoEraTripEnabled or not targetRobot.Parent or getFutureCarriedCount() >= targetCap then break end
                         shootBlaster()
                         task.wait(0.12)
                     end
@@ -1107,7 +1096,7 @@ local function handleFutureEra()
             task.wait(0.2)
             
             -- Jika setelah zona selesai peti sudah 10 / penuh, langsung break ke setor
-            if getCarriedCratesCount() >= targetCap then
+            if getFutureCarriedCount() >= targetCap then
                 break
             end
         end
@@ -1116,15 +1105,10 @@ local function handleFutureEra()
         collectFutureCrates(true)
         
         -- Jika membawa peti setelah putaran zona selesai, setor ke EraCollect & kembali ke KickReady
-        if getCarriedCratesCount() > 0 then
-            safePivotTo(FUTURE_COLLECT_CF)
-            local depositStart = os.clock()
-            while getCarriedCratesCount() > 0 and os.clock() - depositStart < 3 do
-                task.wait(0.2)
-            end
-            task.wait(0.3)
-            safePivotTo(FUTURE_KICK_READY_CF)
-            task.wait(0.3)
+        if getFutureCarriedCount() > 0 then
+            depositFuture()
+            -- Jangan lanjutkan putaran lama; mulai ulang dari Zone 5.
+            continue
         end
         
         -- Mampir ke Trader HANYA di menit ke-9 (sisa <= 65s) selama 1 detik untuk borong craft
@@ -1138,58 +1122,27 @@ end
 local function getRomanGuards()
     local guards = {}
     local eraTrip = Workspace:FindFirstChild("EraTrip")
-    local roman = eraTrip and (eraTrip:FindFirstChild("Roman") or eraTrip)
-    if not roman then return guards end
-    
-    -- Cari folder Chasers (bisa langsung di bawah Roman atau di dalam VaultRaid)
-    local chasersFolder = roman:FindFirstChild("Chasers", true)
-    if chasersFolder then
-        for _, child in ipairs(chasersFolder:GetChildren()) do
-            local isDead = child:GetAttribute("Dead") == true
-            local hp = child:GetAttribute("HP")
-            local isAlive = not isDead and (hp == nil or hp > 0)
-            if isAlive then
+    local roman = eraTrip and eraTrip:FindFirstChild("Roman")
+    local chasers = roman and roman:FindFirstChild("Chasers")
+    if chasers then
+        for _, child in ipairs(chasers:GetChildren()) do
+            local modelName = child:GetAttribute("Model") or child.Name
+            local isAlive = not child:GetAttribute("Dead") and (child:GetAttribute("HP") == nil or child:GetAttribute("HP") > 0)
+            if isAlive and (ROMAN_GUARD_NAMES[modelName] or ROMAN_GUARD_NAMES[child.Name] or child.Name == "Guard") then
                 table.insert(guards, child)
             end
         end
     end
-    
-    -- Fallback: cari model / basepart yang punya atribut MaxHP di area Roman
-    if #guards == 0 then
-        for _, desc in ipairs(roman:GetDescendants()) do
-            if desc:IsA("Model") or desc:IsA("BasePart") then
-                local maxHP = desc:GetAttribute("MaxHP")
-                local hp = desc:GetAttribute("HP")
-                local isDead = desc:GetAttribute("Dead") == true
-                if maxHP and not isDead and (hp == nil or hp > 0) then
-                    table.insert(guards, desc)
-                end
-            end
-        end
-    end
-    
-    -- Urutkan prioritas: Rarity Tertinggi (Tier 5 Boss -> 1) atau posisi paling dalam (Zone 5 = X paling kecil)
-    table.sort(guards, function(a, b)
-        local tierA = a:GetAttribute("Tier") or 1
-        local tierB = b:GetAttribute("Tier") or 1
-        if tierA ~= tierB then
-            return tierA > tierB
-        end
-        local posA = a:IsA("BasePart") and a.Position or a:GetPivot().Position
-        local posB = b:IsA("BasePart") and b.Position or b:GetPivot().Position
-        return posA.X < posB.X
-    end)
-    
     return guards
 end
 
 local function getVaultChests(zoneIndex)
     local chests = {}
     local eraTrip = Workspace:FindFirstChild("EraTrip")
-    local roman = eraTrip and (eraTrip:FindFirstChild("Roman") or eraTrip)
-    local vaultRaid = roman and (roman:FindFirstChild("VaultRaid", true) or roman)
+    local roman = eraTrip and eraTrip:FindFirstChild("Roman")
+    local vaultRaid = roman and roman:FindFirstChild("VaultRaid")
     if vaultRaid then
-        for _, child in ipairs(vaultRaid:GetDescendants()) do
+        for _, child in ipairs(vaultRaid:GetChildren()) do
             if child.Name == "VaultChest" then
                 local tier = child:GetAttribute("Tier")
                 if zoneIndex == nil or tier == zoneIndex then
@@ -1202,46 +1155,51 @@ local function getVaultChests(zoneIndex)
     table.sort(chests, function(a, b)
         local tierA = a:GetAttribute("Tier") or 1
         local tierB = b:GetAttribute("Tier") or 1
-        if tierA ~= tierB then
-            return tierA > tierB
-        end
-        return a:GetPivot().Position.X < b:GetPivot().Position.X
+        return tierA > tierB
     end)
     return chests
 end
 
-local function getReadyChests()
-    local allChests = getVaultChests()
-    local ready = {}
-    for _, chest in ipairs(allChests) do
+local function openReadyChests(zoneIndex)
+    local chests = getVaultChests(zoneIndex)
+    for _, chest in ipairs(chests) do
+        if not autoEraTripEnabled or not isInEra("Roman") then break end
+        if getCarriedCratesCount() >= 5 then break end
+        
         local isReady = chest:GetAttribute("Ready") == true
         local prompt = chest:FindFirstChild("ChestBody") and chest.ChestBody:FindFirstChild("OpenChest")
         if (isReady or (prompt and prompt.Enabled)) and chest.Parent then
-            table.insert(ready, { chest = chest, prompt = prompt })
+            local pos = chest:GetPivot().Position
+            safePivotTo(CFrame.new(pos) * CFrame.new(0, 2, 0))
+            task.wait(0.2)
+            if prompt then
+                pcall(function()
+                    fireproximityprompt(prompt)
+                end)
+            end
+            task.wait(0.65)
         end
     end
-    return ready
-end
-
-local function collectDroppedLoot()
-    local eraTrip = Workspace:FindFirstChild("EraTrip")
-    local roman = eraTrip and (eraTrip:FindFirstChild("Roman") or eraTrip)
-    if not roman then return false end
     
-    local collected = false
-    for _, child in ipairs(roman:GetDescendants()) do
-        if child.Name == "DroppedLoot" and child:FindFirstChild("Base") then
-            local prompt = child.Base:FindFirstChild("SwapLoot")
-            if prompt and getCarriedCratesCount() < 5 then
-                safePivotTo(CFrame.new(child.Base.Position) * CFrame.new(0, 2, 0))
-                task.wait(0.15)
-                pcall(function() fireproximityprompt(prompt) end)
-                task.wait(0.35)
-                collected = true
+    -- Ambil juga DroppedLoot jika ada di area
+    local eraTrip = Workspace:FindFirstChild("EraTrip")
+    local roman = eraTrip and eraTrip:FindFirstChild("Roman")
+    local vaultRaid = roman and roman:FindFirstChild("VaultRaid")
+    if vaultRaid then
+        for _, child in ipairs(vaultRaid:GetChildren()) do
+            if child.Name == "DroppedLoot" and child:FindFirstChild("Base") then
+                local prompt = child.Base:FindFirstChild("SwapLoot")
+                if prompt and getCarriedCratesCount() < 5 then
+                    safePivotTo(CFrame.new(child.Base.Position) * CFrame.new(0, 2, 0))
+                    task.wait(0.2)
+                    pcall(function()
+                        fireproximityprompt(prompt)
+                    end)
+                    task.wait(0.5)
+                end
             end
         end
     end
-    return collected
 end
 
 local function fightGuard(guard)
@@ -1249,15 +1207,14 @@ local function fightGuard(guard)
     
     local timeout = os.clock() + 10
     while autoEraTripEnabled and isInEra("Roman") and guard.Parent and os.clock() < timeout do
-        local isDead = guard:GetAttribute("Dead") == true
-        local hp = guard:GetAttribute("HP")
-        local isAlive = not isDead and (hp == nil or hp > 0)
+        local isAlive = not guard:GetAttribute("Dead") and (guard:GetAttribute("HP") == nil or guard:GetAttribute("HP") > 0)
         if not isAlive then break end
         
         local guardPos = guard:IsA("BasePart") and guard.Position or guard:GetPivot().Position
         local guardCF = guard:IsA("BasePart") and guard.CFrame or guard:GetPivot()
         
         -- POSISI AMAN: TEPAT DI BELAKANG GUARD (-3.5 studs) dan SEDIKIT DI ATAS (+4.5 studs)
+        -- Serangan Guard (AttackDir) selalu mengarah ke depan. Di belakang guard, kita 100% kebal dari tebasan!
         local safeCF = CFrame.new(guardPos - (guardCF.LookVector * 3.5) + Vector3.new(0, 4.5, 0), guardPos)
         safePivotTo(safeCF)
         
@@ -1285,122 +1242,120 @@ local function fightGuard(guard)
 end
 
 local function depositRoman()
-    -- 1. TP ke EraCollect untuk setor peti
+    -- 1. TP ke EraCollect Roman.
     safePivotTo(ROMAN_COLLECT_CF)
+    task.wait(0.2)
+
+    -- 2. Aktifkan ProximityPrompt EraCollect.
+    -- Sebelumnya script hanya teleport dan menunggu, tanpa trigger prompt setor.
+    local eraTrip = Workspace:FindFirstChild("EraTrip")
+    local roman = eraTrip and eraTrip:FindFirstChild("Roman")
+    local collectPart = roman and roman:FindFirstChild("EraCollect")
+    local prompt = collectPart and collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and prompt.Enabled then
+        pcall(function()
+            fireproximityprompt(prompt)
+        end)
+    end
+
+    -- 3. Tunggu server mengosongkan bawaan setelah setor.
     local depositStart = os.clock()
-    while getCarriedCratesCount() > 0 and os.clock() - depositStart < 2.5 do
+    while getRomanCarriedCount() > 0 and os.clock() - depositStart < 5 do
         task.wait(0.2)
     end
-    task.wait(0.2)
-    
-    -- 2. Langsung kembali ke EraKickReady
+    task.wait(0.3)
+
+    -- 4. Kembali ke KickReady agar farming berlanjut.
     safePivotTo(ROMAN_KICK_READY_CF)
     task.wait(0.3)
 end
 
 -- ================= MAIN ROMAN ROUTINE =================
 local function handleRomanEra()
-    -- TP sekali di awal masuk Roman
-    safePivotTo(ROMAN_KICK_READY_CF)
-    task.wait(0.5)
+    local initializedAtKickReady = false
     
-    local isWaitingAtKickReady = false
-
     while autoEraTripEnabled and isInEra("Roman") and Workspace:GetAttribute("EraTripState") == "Open" do
-        -- 1. Jika tas penuh (>= 5), langsung setor ke EraCollect
-        if getCarriedCratesCount() >= 5 then
-            depositRoman()
-            isWaitingAtKickReady = false
+        -- Step 1: Sekali di awal masuk Roman, TP ke EraKickReady, jeda 0.5s
+        if not initializedAtKickReady then
+            safePivotTo(ROMAN_KICK_READY_CF)
+            task.wait(0.5)
+            initializedAtKickReady = true
         end
-
-        -- 2. Ambil DroppedLoot yang ada di tanah
-        collectDroppedLoot()
-        if getCarriedCratesCount() >= 5 then
+        
+        -- Step 2: Cek kapasitas bawaan (Maksimal 5 di Roman)
+        if getRomanCarriedCount() >= 5 then
             depositRoman()
-            isWaitingAtKickReady = false
+            task.wait(0.2)
+            continue
         end
-
-        -- 3. Cari dan buka Chest yang sudah Ready (Prioritas Tier 5 Mythic -> 1)
-        local readyChests = getReadyChests()
-        if #readyChests > 0 and getCarriedCratesCount() < 5 then
-            isWaitingAtKickReady = false
-            for _, item in ipairs(readyChests) do
-                if not autoEraTripEnabled or not isInEra("Roman") or getCarriedCratesCount() >= 5 then break end
-                local chest = item.chest
-                local prompt = item.prompt or (chest:FindFirstChild("ChestBody") and chest.ChestBody:FindFirstChild("OpenChest"))
-                if chest.Parent and (chest:GetAttribute("Ready") == true or (prompt and prompt.Enabled)) then
-                    local pos = chest:GetPivot().Position
-                    safePivotTo(CFrame.new(pos.X, pos.Y + 2, pos.Z))
-                    task.wait(0.15)
-                    if prompt then
-                        pcall(function() fireproximityprompt(prompt) end)
+        
+        -- Step 3: SELALU MULAI DARI ZONA TERTINGGI (Zone 5 Mythic/Boss -> 4 -> 3 -> 2 -> 1)
+        local depositedThisPass = false
+        for _, zone in ipairs(ROMAN_ZONES) do
+            if not autoEraTripEnabled or not isInEra("Roman") or Workspace:GetAttribute("EraTripState") ~= "Open" then
+                break
+            end
+            
+            -- Jika di tengah perjalanan tas penuh (>= 5), langsung setor lalu balik ke EraKickReady dan break
+            if getRomanCarriedCount() >= 5 then
+                depositRoman()
+                depositedThisPass = true
+                break
+            end
+            
+            local zoneTimeout = os.clock() + 25
+            while autoEraTripEnabled and isInEra("Roman") and os.clock() < zoneTimeout do
+                if getRomanCarriedCount() >= 5 then break end
+                
+                local allGuards = getRomanGuards()
+                local zoneGuards = {}
+                for _, g in ipairs(allGuards) do
+                    local gPos = g:IsA("BasePart") and g.Position or g:GetPivot().Position
+                    if gPos.X >= zone.MinX and gPos.X <= zone.MaxX then
+                        table.insert(zoneGuards, g)
                     end
-                    task.wait(0.5)
-                    collectDroppedLoot()
                 end
+                
+                if #zoneGuards == 0 then
+                    break
+                end
+                
+                local targetGuard = zoneGuards[1]
+                fightGuard(targetGuard)
+                
+                openReadyChests(zone.Index)
             end
-
-            if getCarriedCratesCount() >= 5 then
+            
+            -- Buka chest di zona ini setelah guard dikalahkan
+            openReadyChests(zone.Index)
+            
+            -- Jika setelah buka chest tas penuh (>= 5), langsung setor lalu balik ke EraKickReady dan break
+            if getRomanCarriedCount() >= 5 then
                 depositRoman()
+                depositedThisPass = true
+                break
             end
-        end
-
-        -- 4. Cari Guard yang masih hidup (Prioritas Tier 5 Boss -> 1)
-        local guards = getRomanGuards()
-        if #guards > 0 and getCarriedCratesCount() < 5 then
-            isWaitingAtKickReady = false
-            local targetGuard = guards[1]
-            local targetName = targetGuard:GetAttribute("Model") or targetGuard.Name
-            statusParagraph:SetDesc("Roman: Melawan Guard " .. tostring(targetName) .. "...")
-            fightGuard(targetGuard)
+            
             task.wait(0.2)
-
-            -- Buka chest dan ambil loot yang baru saja dibuka dari guard ini
-            collectDroppedLoot()
-            local afterChests = getReadyChests()
-            for _, item in ipairs(afterChests) do
-                if getCarriedCratesCount() >= 5 then break end
-                local chest = item.chest
-                local prompt = item.prompt
-                if chest.Parent and (chest:GetAttribute("Ready") == true or (prompt and prompt.Enabled)) then
-                    safePivotTo(CFrame.new(chest:GetPivot().Position) * CFrame.new(0, 2, 0))
-                    task.wait(0.15)
-                    if prompt then pcall(function() fireproximityprompt(prompt) end) end
-                    task.wait(0.5)
-                    collectDroppedLoot()
-                end
-            end
-
-            if getCarriedCratesCount() >= 5 then
-                depositRoman()
-            end
         end
-
-        -- 5. Jika tidak ada lagi guard hidup & tidak ada chest ready, tapi masih membawa peti (>0), setor ke EraCollect
-        if #guards == 0 and #readyChests == 0 and getCarriedCratesCount() > 0 then
+        
+        -- Jika putaran zona selesai dan masih membawa peti (>0), setor ke EraCollect lalu balik ke EraKickReady
+        if getRomanCarriedCount() > 0 and not depositedThisPass then
             depositRoman()
-            isWaitingAtKickReady = false
         end
-
-        -- 6. Mampir ke Trader HANYA di menit ke-9 (sisa <= 65s)
+        
+        -- Mampir ke Trader HANYA di menit ke-9 (sisa <= 65s) selama 1 detik untuk borong craft
         checkFinalMinuteTraderCraft("Roman", "RomanMythic", canCraftRomanMythic, ROMAN_TRADER_CF, ROMAN_KICK_READY_CF)
-
-        -- 7. Jika arena bersih (guard kalah semua & chest habis), tunggu wave berikutnya di EraKickReady
-        -- PENTING: Hanya TP sekali saat masuk mode tunggu agar tidak terjadi loop-teleport yang stuttering!
-        if #guards == 0 and #readyChests == 0 and getCarriedCratesCount() == 0 then
-            statusParagraph:SetDesc("Roman: Menunggu wave guard / chest berikutnya...")
-            if not isWaitingAtKickReady then
-                safePivotTo(ROMAN_KICK_READY_CF)
-                isWaitingAtKickReady = true
-            end
-            task.wait(1.0)
-        else
-            isWaitingAtKickReady = false
-            task.wait(0.2)
+        
+        -- Jika semua guard di arena sedang kosong / wave belum muncul, tunggu di EraKickReady
+        local remainingGuards = getRomanGuards()
+        if #remainingGuards == 0 then
+            safePivotTo(ROMAN_KICK_READY_CF)
+            task.wait(1.5)
         end
+        
+        task.wait(0.3)
     end
-
-    statusParagraph:SetDesc("Roman selesai.")
 end
 
 -- ================= JURASSIC ERA SCANNING & AUTOMATION =================
@@ -1446,35 +1401,13 @@ end
 
 local function depositJurassic()
     -- 1. TP ke EraCollect untuk menetaskan telur
-    local eraTrip = Workspace:FindFirstChild("EraTrip")
-    local jurassic = eraTrip and eraTrip:FindFirstChild("Jurassic")
-    local collectPart = jurassic and jurassic:FindFirstChild("EraCollect", true)
-    local targetCF = (collectPart and collectPart:IsA("BasePart")) and collectPart.CFrame or JURASSIC_COLLECT_CF
-
-    safePivotTo(targetCF)
-    local _, myRoot = getCharacterParts()
-    if myRoot then myRoot.AssemblyLinearVelocity = Vector3.zero end
-
-    -- Trigger ProximityPrompt jika ada pada part EraCollect
-    if collectPart then
-        local prompt = collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
-        if prompt then pcall(function() fireproximityprompt(prompt) end) end
-    end
-
+    safePivotTo(JURASSIC_COLLECT_CF)
     local depositStart = os.clock()
-    while getCarriedEggsCount() > 0 and (os.clock() - depositStart) < 3.0 do
-        task.wait(0.15)
-        if collectPart then
-            local prompt = collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt then pcall(function() fireproximityprompt(prompt) end) end
-        end
+    while getCarriedEggsCount() > 0 and os.clock() - depositStart < 3.5 do
+        task.wait(0.2)
     end
-
-    task.wait(0.2)
-    -- Setelah setor di EraCollect, WAJIB kembali ke KickReady agar siap melooping berikutnya!
+    task.wait(0.3)
     safePivotTo(JURASSIC_KICK_READY_CF)
-    local _, r = getCharacterParts()
-    if r then r.AssemblyLinearVelocity = Vector3.zero end
     task.wait(0.3)
 end
 
@@ -1631,84 +1564,59 @@ end
 
 -- ================= MAIN JURASSIC ROUTINE =================
 local function handleJurassicEra()
-    -- Helper: tunggu sampai Chaser berjarak aman dari target posisi
+    -- Helper: wait until chaser is far enough or move to safe spot
     local function waitForChaserSafe(targetPos, safeDist)
         local eraTripFolder = Workspace:FindFirstChild("EraTrip")
         local jurassicFolder = eraTripFolder and eraTripFolder:FindFirstChild("Jurassic")
         local chaser = jurassicFolder and jurassicFolder:FindFirstChild("Chaser")
         if not chaser then return true end
-        local maxWait = 6  -- seconds, hindari freeze lama
+        local maxWait = 8  -- seconds, to avoid infinite loop
         local start = os.clock()
         while os.clock() - start < maxWait do
-            local chaserPos = chaser:GetPivot().Position
-            local dist = (targetPos - chaserPos).Magnitude
+            local dist = (targetPos - chaser:GetPivot().Position).Magnitude
             if dist >= safeDist then return true end
-            -- Jika terlalu dekat dengan Chaser, mundur sementara ke KickReady
+            -- if too close, temporarily retreat to KickReady
             safePivotTo(JURASSIC_KICK_READY_CF)
-            local _, myRoot = getCharacterParts()
-            if myRoot then myRoot.AssemblyLinearVelocity = Vector3.zero end
-            task.wait(0.4)
+            task.wait(0.5)
         end
         return false
     end
 
-    -- Inisialisasi: teleport ke KickReady
+    -- Initialize: teleport to KickReady
     safePivotTo(JURASSIC_KICK_READY_CF)
-    local _, initRoot = getCharacterParts()
-    if initRoot then initRoot.AssemblyLinearVelocity = Vector3.zero end
-    task.wait(0.4)
+    task.wait(0.5)
 
-    local maxCap = 1  -- Ambil 1 telur langsung setor ke EraCollect
-    local CHASER_SAFE_DIST = 20  -- jarak aman minimal (studs)
+    local maxCap = 1  -- Ambil 1 telur langsung collect
+    local nestsVisited = {}
+    local CHASER_SAFE_DIST = 20  -- jarak minimal yang dianggap aman (stud)
 
-    while autoEraTripEnabled and isInEra("Jurassic") and Workspace:GetAttribute("EraTripState") == "Open" do
-        -- 1. Jika masih ada telur yang terbawa, langsung setor ke EraCollect & balik ke KickReady
+    while autoEraTripEnabled and isInEra("Jurassic") do
+        -- Jika masih ada telur yang terbawa, langsung setor ke EraCollect dulu
         if getCarriedEggsCount() > 0 then
-            depositJurassic()
+            safePivotTo(JURASSIC_COLLECT_CF)
+            local depositStart = os.clock()
+            while getCarriedEggsCount() > 0 and os.clock() - depositStart < 3.5 do
+                task.wait(0.2)
+            end
+            task.wait(0.3)
+            safePivotTo(JURASSIC_KICK_READY_CF)
+            task.wait(0.4)
         end
-
         local nests = getJurassicNests()
         local character = player.Character
         local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 
-        -- Cari sarang yang memiliki telur aktif (prompt StealEgg yang Enabled)
-        local availableNests = {}
-        for _, nest in ipairs(nests) do
-            local hasActiveEgg = false
-            for _, desc in ipairs(nest:GetDescendants()) do
-                if desc:IsA("ProximityPrompt") and desc.Enabled and (desc.Name == "StealEgg" or desc.ActionText == "Steal" or desc.ObjectText == "Egg") then
-                    hasActiveEgg = true
-                    break
-                end
-            end
-            if hasActiveEgg then
-                table.insert(availableNests, nest)
-            end
-        end
-
-        -- Jika seluruh telur di arena sedang kosong/cooldown respawn:
-        if #availableNests == 0 then
-            -- Tunggu sebentar di KickReady secara aman lalu rescan loop
-            safePivotTo(JURASSIC_KICK_READY_CF)
-            local _, myRoot = getCharacterParts()
-            if myRoot then myRoot.AssemblyLinearVelocity = Vector3.zero end
-            task.wait(1.5)
-            continue
-        end
-
-        -- Prioritas sarang: Tier tertinggi duluan (Tier 5 Mythic > 4 > 3 > 2 > 1)
-        table.sort(availableNests, function(a, b)
+        -- getJurassicNests mengembalikan Model Nest secara langsung.
+        table.sort(nests, function(a, b)
             local tierA = a:GetAttribute("Tier") or 1
             local tierB = b:GetAttribute("Tier") or 1
             if tierA ~= tierB then
                 return tierA > tierB
             end
 
-            if rootPart then
-                return (a:GetPivot().Position - rootPart.Position).Magnitude <
-                       (b:GetPivot().Position - rootPart.Position).Magnitude
-            end
-            return a.Name < b.Name
+            if not rootPart then return a.Name < b.Name end
+            return (a:GetPivot().Position - rootPart.Position).Magnitude <
+                   (b:GetPivot().Position - rootPart.Position).Magnitude
         end)
 
         local safeNests = {}
@@ -1717,7 +1625,8 @@ local function handleJurassicEra()
         local jurassicFolder = eraTripFolder and eraTripFolder:FindFirstChild("Jurassic")
         local chaser = jurassicFolder and jurassicFolder:FindFirstChild("Chaser")
 
-        for _, nest in ipairs(availableNests) do
+        for _, nest in ipairs(nests) do
+            if nestsVisited[nest] then continue end
             local distToChaser = chaser and
                 (nest:GetPivot().Position - chaser:GetPivot().Position).Magnitude or math.huge
 
@@ -1738,54 +1647,72 @@ local function handleJurassicEra()
             end
         end
 
-        local eggDeposited = false
         for _, nest in ipairs(processingList) do
-            if not autoEraTripEnabled or not isInEra("Jurassic") or Workspace:GetAttribute("EraTripState") ~= "Open" then break end
-            if getCarriedEggsCount() >= maxCap then break end
+            if not autoEraTripEnabled or not isInEra("Jurassic") then break end
 
             local nestPos = nest:GetPivot().Position
             local safe = waitForChaserSafe(nestPos, CHASER_SAFE_DIST)
             if not safe then continue end
 
-            -- Cari semua prompt StealEgg di sarang ini
+            -- Cari semua telur aktif di dalam sarang ini (prompt StealEgg yang Enabled)
             local activePrompts = {}
             for _, desc in ipairs(nest:GetDescendants()) do
-                if desc:IsA("ProximityPrompt") and desc.Enabled and (desc.Name == "StealEgg" or desc.ActionText == "Steal" or desc.ObjectText == "Egg") then
+                if desc:IsA("ProximityPrompt") and desc.Enabled and (desc.Name == "StealEgg" or desc.ActionText == "Steal") then
                     table.insert(activePrompts, desc)
                 end
             end
 
+            -- Jika tidak ada telur aktif di nest ini, tandai sudah dikunjungi dan lewati
+            if #activePrompts == 0 then
+                nestsVisited[nest] = true
+                continue
+            end
+
             for _, prompt in ipairs(activePrompts) do
-                if not autoEraTripEnabled or not isInEra("Jurassic") or Workspace:GetAttribute("EraTripState") ~= "Open" then break end
+                if not autoEraTripEnabled or not isInEra("Jurassic") then break end
                 if getCarriedEggsCount() >= maxCap then break end
                 if not prompt.Enabled or not prompt.Parent then continue end
 
-                -- Teleport ke telur
+                -- Teleport tepat ke telur (part Egg1)
                 local eggPart = prompt.Parent:IsA("BasePart") and prompt.Parent or prompt.Parent:FindFirstChildWhichIsA("BasePart")
                 local targetPos = eggPart and eggPart.Position or nestPos
                 safePivotTo(CFrame.new(targetPos.X, targetPos.Y + 1.2, targetPos.Z))
-                local _, myRoot = getCharacterParts()
-                if myRoot then myRoot.AssemblyLinearVelocity = Vector3.zero end
-                task.wait(0.12)
+                task.wait(0.15)
 
-                -- Tangani hold duration
+                -- Tangani hold duration (0.7 detik)
                 local hold = prompt.HoldDuration or 0.7
-                pcall(function() prompt.HoldDuration = 0 end)
-                pcall(function() fireproximityprompt(prompt) end)
+                pcall(function()
+                    prompt.HoldDuration = 0
+                end)
+                pcall(function()
+                    fireproximityprompt(prompt)
+                end)
+                -- Berikan jeda waktu hold duration agar server menyelesaikan steal
                 task.wait(math.max(0.75, hold + 0.1))
 
-                -- Begitu ambil 1 telur langsung setor ke EraCollect & kembali ke KickReady!
+                -- Tunggu hingga telur terambil
+                -- Begitu ambil 1 telur langsung setor ke EraCollect!
                 if getCarriedEggsCount() >= maxCap then
-                    depositJurassic()
-                    eggDeposited = true
+                    local collectPos = JURASSIC_COLLECT_CF.Position
+                    waitForChaserSafe(collectPos, CHASER_SAFE_DIST)
+
+                    -- Deposit ke EraCollect (hatch otomatis ketika pemain berada di EraCollect)
+                    safePivotTo(JURASSIC_COLLECT_CF)
+                    local depositStart = os.clock()
+                    while getCarriedEggsCount() > 0 and os.clock() - depositStart < 3.5 do
+                        task.wait(0.2)
+                    end
+                    task.wait(0.3)
+
+                    -- Kembali ke KickReady untuk lanjut ambil telur berikutnya
+                    safePivotTo(JURASSIC_KICK_READY_CF)
+                    task.wait(0.4)
                     break
                 end
             end
 
-            -- Begitu telur disetor, break loop sarang untuk langsung mulai putaran ambil telur berikutnya!
-            if eggDeposited then
-                break
-            end
+            -- Begitu 1 telur disetor, langsung break loop sarang untuk scan ulang sarang tertinggi berikutnya!
+            break
         end
 
         -- Mampir ke Trader HANYA di menit ke-9 (sisa <= 65s) selama 1 detik untuk borong craft
@@ -1794,7 +1721,7 @@ local function handleJurassicEra()
         task.wait(0.3)
     end
 
-    statusParagraph:SetDesc("Jurassic selesai.")
+    statusParagraph:SetDesc("Jurassic selesai – semua telur terkumpul atau tidak ada lagi yang dapat diambil.")
 end
 
 -- ================= 80s ARCADE DANCE-OFF AUTOMATION =================
@@ -1920,11 +1847,17 @@ local function handleEightiesEra()
 end
 
 -- ================= MAIN CONTROLLER LOOP =================
-function runAutoEraTrip()
-    if autoEraTripRunning then return end
+function runAutoEraTrip(myGen)
+    -- Jika ada loop lama yang masih jalan, tunggu dia exit dulu (max 3 detik)
+    if autoEraTripRunning then
+        local t0 = os.clock()
+        while autoEraTripRunning and os.clock() - t0 < 3 do
+            task.wait(0.1)
+        end
+    end
     autoEraTripRunning = true
     
-    while autoEraTripEnabled do
+    while autoEraTripEnabled and autoEraTripGeneration == myGen do
         local humanoid, rootPart = getCharacterParts()
         if not humanoid or not rootPart then
             task.wait(0.5)
@@ -2043,7 +1976,7 @@ function runAutoEraTrip()
                     end
                     
                     local deadline = os.clock() + 4
-                    while autoEraTripEnabled and os.clock() < deadline do
+                    while autoEraTripEnabled and autoEraTripGeneration == myGen and os.clock() < deadline do
                         if isInEra(curEra) then break end
                         task.wait(0.2)
                     end
