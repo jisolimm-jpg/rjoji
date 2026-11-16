@@ -1381,22 +1381,7 @@ local function fightGuard(guard)
     end
 end
 
--- Mencegah teleport EraCollect berulang jika jumlah peti belum berubah.
-local lastRomanDepositCount = nil
-
 local function depositRoman()
-    local carriedBeforeDeposit = getCarriedCratesCount()
-    if carriedBeforeDeposit <= 0 then
-        lastRomanDepositCount = nil
-        return true
-    end
-
-    -- Untuk jumlah peti yang sama, cukup coba setor satu kali.
-    if lastRomanDepositCount == carriedBeforeDeposit then
-        return false
-    end
-    lastRomanDepositCount = carriedBeforeDeposit
-
     -- 1. TP ke EraCollect untuk setor peti
     safePivotTo(ROMAN_COLLECT_CF)
     local depositStart = os.clock()
@@ -1405,15 +1390,9 @@ local function depositRoman()
     end
     task.wait(0.2)
 
-    local deposited = getCarriedCratesCount() <= 0
-    if deposited then
-        lastRomanDepositCount = nil
-    end
-
     -- 2. Langsung kembali ke EraKickReady
     safePivotTo(ROMAN_KICK_READY_CF)
     task.wait(0.3)
-    return deposited
 end
 
 -- ================= MAIN ROMAN ROUTINE =================
@@ -1423,6 +1402,7 @@ local function handleRomanEra()
     task.wait(0.5)
     
     local isWaitingAtKickReady = false
+    local romanEmptyDepositAttemptedForCount = nil
 
     while autoEraTripEnabled and isInEra("Roman") and Workspace:GetAttribute("EraTripState") == "Open" do
         -- 1. Jika tas penuh (>= 5), langsung setor ke EraCollect
@@ -1496,8 +1476,14 @@ local function handleRomanEra()
 
         -- 5. Jika tidak ada lagi guard hidup & tidak ada chest ready, tapi masih membawa peti (>0), setor ke EraCollect
         if #guards == 0 and #readyChests == 0 and getCarriedCratesCount() > 0 then
-            depositRoman()
+            local carriedNow = getCarriedCratesCount()
+            if romanEmptyDepositAttemptedForCount ~= carriedNow then
+                depositRoman()
+                romanEmptyDepositAttemptedForCount = carriedNow
+            end
             isWaitingAtKickReady = false
+        else
+            romanEmptyDepositAttemptedForCount = nil
         end
 
         -- 6. Mampir ke Trader HANYA di menit ke-9 (sisa <= 65s)
