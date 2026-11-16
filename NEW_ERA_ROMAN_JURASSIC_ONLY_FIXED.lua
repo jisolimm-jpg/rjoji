@@ -460,14 +460,16 @@ local autoEraTripRunning = false
 local autoEraTripGeneration = 0  -- naik setiap ON/OFF → loop lama otomatis stop
 local movementMode = "TP ⚡"
 local craftedCount = 0
+local iceAgeMode = "Default" -- "Default" = Tier 5→1, "Zona Terkecil Saja" = Tier 1 only
 
 -- Selected Eras (Supports Multiple Selection)
 local selectedEras = {
-    ["The Future"]   = true,
-    ["Ice Age"]      = true,
-    ["Jurassic"]     = true,
-    ["Roman Empire"] = true,
-    ["80s Arcade"]   = true,
+    ["The Future"]              = true,
+    ["Ice Age"]                 = true,
+    ["Ice Age (Zona Terkecil)"] = false,
+    ["Jurassic"]                = true,
+    ["Roman Empire"]            = true,
+    ["80s Arcade"]              = true,
 }
 
 local function isEraSelected(eraInternalName)
@@ -475,6 +477,16 @@ local function isEraSelected(eraInternalName)
     if displayName and selectedEras[displayName] then
         return true
     end
+    -- Ice Age (Zona Terkecil) also counts as IceAge being selected
+    if eraInternalName == "IceAge" and selectedEras["Ice Age (Zona Terkecil)"] then
+        return true
+    end
+    return false
+end
+
+local function isIceAgeSmallZone()
+    if selectedEras["Ice Age (Zona Terkecil)"] then return true end
+    if iceAgeMode == "Zona Terkecil Saja" then return true end
     return false
 end
 
@@ -793,7 +805,7 @@ EraTripTab:Toggle({
 
 EraTripTab:Dropdown({
     Title = "Pilih Event Era (Bisa Pilih Banyak)",
-    Values = { "The Future", "Ice Age", "Jurassic", "Roman Empire", "80s Arcade" },
+    Values = { "The Future", "Ice Age", "Ice Age (Zona Terkecil)", "Jurassic", "Roman Empire", "80s Arcade" },
     Value = { "The Future", "Ice Age", "Roman Empire", "Jurassic", "80s Arcade" },
     Multi = true,
     Callback = function(selected)
@@ -823,6 +835,19 @@ EraTripTab:Dropdown({
     Value = "TP ⚡",
     Callback = function(option)
         movementMode = option
+    end,
+})
+
+EraTripTab:Dropdown({
+    Title = "ICE AGE 2 (Mode Zona Terkecil)",
+    Values = { "OFF – Semua Zona (Tier 5→1)", "ON – Zona Terkecil Saja (Tier 1)" },
+    Value = "OFF – Semua Zona (Tier 5→1)",
+    Callback = function(option)
+        if option == "ON – Zona Terkecil Saja (Tier 1)" then
+            iceAgeMode = "Zona Terkecil Saja"
+        else
+            iceAgeMode = "Default"
+        end
     end,
 })
 
@@ -1504,7 +1529,7 @@ end
 -- ================= ICEAGE ERA SCANNING & AUTOMATION =================
 
 -- Ambil semua IceShard yang belum diambil (Taken == false), sort berdasarkan Tier tertinggi
-local function getIceShards()
+local function getIceShards(onlySmallZone)
     local shards = {}
     local eraTrip = Workspace:FindFirstChild("EraTrip")
     local iceAge = eraTrip and eraTrip:FindFirstChild("IceAge")
@@ -1516,8 +1541,29 @@ local function getIceShards()
             end
         end
     end
-    -- sort: tier tertinggi dulu (Tier 5 Mythic → 1 Common)
-    table.sort(shards, function(a, b) return (a.tier or 1) > (b.tier or 1) end)
+
+    if onlySmallZone then
+        -- Filter to Tier 1 (Common) only; fallback to lowest tier available
+        local tier1 = {}
+        for _, s in ipairs(shards) do
+            if s.tier == 1 then table.insert(tier1, s) end
+        end
+        if #tier1 > 0 then
+            shards = tier1
+        else
+            -- fallback: sort ascending (lowest tier first)
+            table.sort(shards, function(a, b) return (a.tier or 1) < (b.tier or 1) end)
+        end
+        -- Sort by distance from ICEAGE_KICK_READY_CF (closest first)
+        local origin = ICEAGE_KICK_READY_CF.Position
+        table.sort(shards, function(a, b)
+            return (a.obj.Position - origin).Magnitude < (b.obj.Position - origin).Magnitude
+        end)
+    else
+        -- sort: tier tertinggi dulu (Tier 5 Mythic → 1 Common)
+        table.sort(shards, function(a, b) return (a.tier or 1) > (b.tier or 1) end)
+    end
+
     return shards
 end
 
@@ -1569,8 +1615,9 @@ local function handleIceAgeEra()
             task.wait(0.2)
         end
 
-        -- 2. Ambil semua shard di arena, sudah terurut dari Tier 5 (Mythic) -> Tier 1
-        local shards = getIceShards()
+        -- 2. Ambil semua shard di arena, sudah terurut sesuai mode
+        local isSmall = isIceAgeSmallZone()
+        local shards = getIceShards(isSmall)
 
         if #shards > 0 then
             -- Langsung pilih shard dengan rarity TERTINGGI
