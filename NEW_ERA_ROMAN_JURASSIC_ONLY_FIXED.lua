@@ -935,6 +935,35 @@ end
 
 -- ================= FUTURE ERA SCANNING =================
 
+-- Counter khusus Future: HUD hanya dipakai untuk membaca kapasitas.
+local futureCarryBaselineAttr = 0
+local futureCarryBaselineHead = 0
+
+local function getFutureRawCarryAttr()
+    local count = 0
+    local carry = player:GetAttribute("EraCarry")
+    if typeof(carry) == "string" and carry ~= "" then
+        for _ in string.gmatch(carry, "[^,]+") do
+            count = count + 1
+        end
+    elseif typeof(carry) == "number" then
+        count = carry
+    end
+    return count
+end
+
+local function getFutureCarryCount()
+    local attrCount = math.max(0, getFutureRawCarryAttr() - futureCarryBaselineAttr)
+    local headCount = math.max(0, countCarriedAboveHead() - futureCarryBaselineHead)
+    return math.max(attrCount, headCount)
+end
+
+local function resetFutureCarryBaseline()
+    futureCarryBaselineAttr = getFutureRawCarryAttr()
+    futureCarryBaselineHead = countCarriedAboveHead()
+end
+
+
 -- Ambil semua SciCrate di arena yang belum diambil
 -- Prioritas: Urutkan berdasarkan Rarity Tertinggi (Tier 5 Mythic > Tier 4 > Tier 3 > Tier 2 > Tier 1)
 local function getSciCrates()
@@ -1023,7 +1052,8 @@ local function collectFutureCrates(checkLimit)
     for _, crate in ipairs(crates) do
         if not autoEraTripEnabled or not isInEra("Future") then break end
         
-        local curCount, maxFromHUD = getCarriedCratesCount()
+        local curCount = getFutureCarryCount()
+        local _, maxFromHUD = countFromHUD()
         local cap = maxFromHUD or targetCap
         if checkLimit and curCount >= cap then
             break
@@ -1042,7 +1072,7 @@ local function collectFutureCrates(checkLimit)
         -- Ambil cepat: server mendeteksi pickup dalam puluhan ms
         local deadline = os.clock() + 0.18
         while os.clock() < deadline and crate.Parent do
-            local newCount = getCarriedCratesCount()
+            local newCount = getFutureCarryCount()
             if newCount > curCount or (checkLimit and newCount >= cap) then
                 break
             end
@@ -1051,7 +1081,7 @@ local function collectFutureCrates(checkLimit)
         
         collectedAny = true
         
-        local nowCount = getCarriedCratesCount()
+        local nowCount = getFutureCarryCount()
         if checkLimit and nowCount >= cap then
             break
         end
@@ -1072,17 +1102,19 @@ local function handleFutureEra()
             initializedAtKickReady = true
         end
         
-        local carried, maxFromHUD = getCarriedCratesCount()
+        local carried = getFutureCarryCount()
+        local _, maxFromHUD = countFromHUD()
         local targetCap = maxFromHUD or 10
         
         -- Step 2: Cek apakah sudah bawa 10 peti (atau penuh) -> langsung setor ke EraCollect & kembali ke KickReady
         if carried >= targetCap then
             safePivotTo(FUTURE_COLLECT_CF)
             local depositStart = os.clock()
-            while getCarriedCratesCount() > 0 and os.clock() - depositStart < 3 do
+            while getFutureCarryCount() > 0 and os.clock() - depositStart < 3 do
                 task.wait(0.2)
             end
             task.wait(0.3)
+            resetFutureCarryBaseline()
             safePivotTo(FUTURE_KICK_READY_CF)
             task.wait(0.3)
             -- Setelah setor, reset dan langsung mulai lagi dari Zona Tertinggi (Zone 5)!
@@ -1095,7 +1127,7 @@ local function handleFutureEra()
                 break
             end
             
-            local currentCarried = getCarriedCratesCount()
+            local currentCarried = getFutureCarryCount()
             if currentCarried >= targetCap then
                 break
             end
@@ -1103,11 +1135,11 @@ local function handleFutureEra()
             local zoneTimeout = os.clock() + 20
             while autoEraTripEnabled and isInEra("Future") and os.clock() < zoneTimeout do
                 -- Cek batas bawa LEBIH DULU
-                if getCarriedCratesCount() >= targetCap then break end
+                if getFutureCarryCount() >= targetCap then break end
                 
                 -- Pungut crate dengan prioritas rarity tertinggi duluan
                 collectFutureCrates(true)
-                if getCarriedCratesCount() >= targetCap then break end
+                if getFutureCarryCount() >= targetCap then break end
                 
                 local robots = getRobotsInZone(zone)
                 if #robots == 0 then break end
@@ -1127,7 +1159,7 @@ local function handleFutureEra()
                     
                     -- Spam tembakan ke robot: perbarui hover & kunci velocity di tiap tembakan agar TIDAK jatuh oleh gravitasi
                     for _ = 1, 6 do
-                        if not autoEraTripEnabled or not targetRobot.Parent or getCarriedCratesCount() >= targetCap then break end
+                        if not autoEraTripEnabled or not targetRobot.Parent or getFutureCarryCount() >= targetCap then break end
                         
                         local curRoot = targetRobot:FindFirstChild("RootPart") or targetRobot.PrimaryPart
                         if curRoot then
@@ -1154,7 +1186,7 @@ local function handleFutureEra()
             task.wait(0.2)
             
             -- Jika setelah zona selesai peti sudah 10 / penuh, langsung break ke setor
-            if getCarriedCratesCount() >= targetCap then
+            if getFutureCarryCount() >= targetCap then
                 break
             end
         end
@@ -1163,13 +1195,14 @@ local function handleFutureEra()
         collectFutureCrates(true)
         
         -- Jika membawa peti setelah putaran zona selesai, setor ke EraCollect & kembali ke KickReady
-        if getCarriedCratesCount() > 0 then
+        if getFutureCarryCount() > 0 then
             safePivotTo(FUTURE_COLLECT_CF)
             local depositStart = os.clock()
-            while getCarriedCratesCount() > 0 and os.clock() - depositStart < 3 do
+            while getFutureCarryCount() > 0 and os.clock() - depositStart < 3 do
                 task.wait(0.2)
             end
             task.wait(0.3)
+            resetFutureCarryBaseline()
             safePivotTo(FUTURE_KICK_READY_CF)
             task.wait(0.3)
         end
