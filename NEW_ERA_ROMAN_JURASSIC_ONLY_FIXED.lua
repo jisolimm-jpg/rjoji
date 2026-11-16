@@ -1577,56 +1577,69 @@ end
 
 -- ================= ICEAGE ERA SCANNING & AUTOMATION =================
 
--- Smart Farm: pilih tier berdasarkan item IceAge yang masih kurang untuk craft Mammutone.
--- Mapping zona sesuai urutan item: IceAge5/Tusk = Tier 1 (paling rendah),
--- IceAge4 = Tier 2, IceAge3 = Tier 3, IceAge2 = Tier 4, IceAge1 = Tier 5.
+-- Mapping relic ke tier shard:
+-- IceAge5 (Mammoth Tusk) = Tier 1, IceAge4 = Tier 2, ... IceAge1 = Tier 5.
+local ICEAGE_SMART_FARM_ORDER = {
+    { relic = "IceAge5", tier = 1 },
+    { relic = "IceAge4", tier = 2 },
+    { relic = "IceAge3", tier = 3 },
+    { relic = "IceAge2", tier = 4 },
+    { relic = "IceAge1", tier = 5 },
+}
+
+-- Pilih tier pertama yang item relic-nya masih kurang untuk craft Mammutone.
 local function getIceAgeSmartTargetTier()
     local relics = getAllRelics()
-    for itemIndex = 5, 1, -1 do
-        local key = "IceAge" .. tostring(itemIndex)
-        local needed = ICEAGE_MYTHIC_COST[key] or 0
-        local current = tonumber(relics[key]) or 0
-        if current < needed then
-            return 6 - itemIndex, key, current, needed
+    for _, target in ipairs(ICEAGE_SMART_FARM_ORDER) do
+        local current = tonumber(relics[target.relic]) or 0
+        local required = tonumber(ICEAGE_MYTHIC_COST[target.relic]) or 0
+        if current < required then
+            return target.tier, target.relic, current, required
         end
     end
     return nil, nil, nil, nil
 end
 
--- Ambil IceShard hanya dari tier/zona yang sedang dibutuhkan Smart Farm.
+-- Ambil IceShard yang belum diambil dan hanya dari tier target Smart Farm.
 local function getIceShards(targetTier)
     local shards = {}
+    if not targetTier then return shards end
+
     local eraTrip = Workspace:FindFirstChild("EraTrip")
     local iceAge = eraTrip and eraTrip:FindFirstChild("IceAge")
     local iceBrainrots = iceAge and iceAge:FindFirstChild("IceBrainrots")
+
     if iceBrainrots then
         for _, part in ipairs(iceBrainrots:GetChildren()) do
-            if part:IsA("BasePart") and not part:GetAttribute("Taken") then
-                local tier = part:GetAttribute("Tier") or 1
-                if targetTier == nil or tier == targetTier then
-                    table.insert(shards, {obj = part, tier = tier})
-                end
+            local tier = tonumber(part:GetAttribute("Tier")) or 1
+            if part:IsA("BasePart")
+                and not part:GetAttribute("Taken")
+                and tier == targetTier then
+                table.insert(shards, part)
             end
         end
     end
-    -- Jika beberapa shard tersedia di tier target, pilih yang paling dekat.
+
+    -- Jika ada beberapa shard di tier yang sama, pilih yang paling dekat.
     local _, rootPart = getCharacterParts()
-    table.sort(shards, function(a, b)
-        if rootPart then
-            return (a.obj.Position - rootPart.Position).Magnitude <
-                   (b.obj.Position - rootPart.Position).Magnitude
-        end
-        return a.obj.Position.X < b.obj.Position.X
-    end)
+    if rootPart then
+        table.sort(shards, function(a, b)
+            return (a.Position - rootPart.Position).Magnitude
+                < (b.Position - rootPart.Position).Magnitude
+        end)
+    end
+
     return shards
 end
 
--- Hitung shard yang sedang dibawa via EraCarry attribute
+-- Hitung shard yang sedang dibawa via EraCarry attribute.
 local function getCarriedShardsCount()
     local carry = player:GetAttribute("EraCarry")
     local count = 0
     if typeof(carry) == "string" and carry ~= "" then
-        for _ in string.gmatch(carry, "[^,]+") do count = count + 1 end
+        for _ in string.gmatch(carry, "[^,]+") do
+            count = count + 1
+        end
     elseif typeof(carry) == "number" then
         count = carry
     end
@@ -1647,42 +1660,52 @@ local function equipTorch()
     end
 end
 
+local function depositIceAgeShards()
+    safePivotTo(ICEAGE_COLLECT_CF)
+    local eraTrip = Workspace:FindFirstChild("EraTrip")
+    local iceAge = eraTrip and eraTrip:FindFirstChild("IceAge")
+    local collectPart = iceAge and iceAge:FindFirstChild("EraCollect")
+    local prompt = collectPart and collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt then
+        pcall(function() fireproximityprompt(prompt) end)
+    end
+
+    local depositStart = os.clock()
+    while getCarriedShardsCount() > 0 and os.clock() - depositStart < 2.5 do
+        task.wait(0.15)
+    end
+    task.wait(0.2)
+end
+
 local function handleIceAgeEra()
     equipTorch()
 
     while autoEraTripEnabled and isInEra("IceAge") and Workspace:GetAttribute("EraTripState") == "Open" do
         equipTorch()
 
-        -- 1. Jika masih membawa shard, setor dulu sebelum memilih zona berikutnya.
+        -- Setor dahulu jika masih membawa shard.
         if getCarriedShardsCount() > 0 then
-            safePivotTo(ICEAGE_COLLECT_CF)
-            local eraTrip = Workspace:FindFirstChild("EraTrip")
-            local iceAge = eraTrip and eraTrip:FindFirstChild("IceAge")
-            local collectPart = iceAge and iceAge:FindFirstChild("EraCollect")
-            local prompt = collectPart and collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt then pcall(function() fireproximityprompt(prompt) end) end
-
-            local depositStart = os.clock()
-            while getCarriedShardsCount() > 0 and os.clock() - depositStart < 2.5 do
-                task.wait(0.15)
-            end
-            task.wait(0.2)
+            depositIceAgeShards()
         end
 
-        -- 2. Hitung item yang masih kurang, lalu arahkan farming ke tier/zona item itu.
-        local targetTier, targetItem, currentItem, neededItem = getIceAgeSmartTargetTier()
+        -- Hitung ulang kebutuhan relic setiap putaran agar target selalu mengikuti inventory.
+        local targetTier, targetRelic, currentCount, requiredCount = getIceAgeSmartTargetTier()
+
         if targetTier then
             local shards = getIceShards(targetTier)
 
             if #shards > 0 then
-                local targetShard = shards[1].obj
+                local targetShard = shards[1]
                 if targetShard and targetShard.Parent and not targetShard:GetAttribute("Taken") then
                     local shardPos = targetShard.Position
+
+                    -- Farming hanya pada tier yang menghasilkan relic yang masih kurang.
                     safePivotTo(CFrame.new(shardPos.X, shardPos.Y + 1.2, shardPos.Z))
 
-                    -- Tunggu es meleleh terkena torch sebelum mengambil.
+                    -- Tunggu es meleleh terkena Torch.
                     task.wait(1.0)
 
+                    -- Cari ProximityPrompt shard.
                     local shardPrompt = nil
                     local findDeadline = os.clock() + 1.0
                     while os.clock() < findDeadline and not shardPrompt do
@@ -1695,11 +1718,12 @@ local function handleIceAgeEra()
                             local iceAge = eraTrip and eraTrip:FindFirstChild("IceAge")
                             local searchRoot = iceAge or Workspace
                             for _, desc in ipairs(searchRoot:GetDescendants()) do
-                                if desc:IsA("ProximityPrompt") and desc.Parent and desc.Parent:IsA("BasePart") then
-                                    if (desc.Parent.Position - shardPos).Magnitude < 12 then
-                                        shardPrompt = desc
-                                        break
-                                    end
+                                if desc:IsA("ProximityPrompt")
+                                    and desc.Parent
+                                    and desc.Parent:IsA("BasePart")
+                                    and (desc.Parent.Position - shardPos).Magnitude < 12 then
+                                    shardPrompt = desc
+                                    break
                                 end
                             end
                         end
@@ -1708,46 +1732,46 @@ local function handleIceAgeEra()
                     end
 
                     if shardPrompt then
-                        pcall(function() fireproximityprompt(shardPrompt) end)
+                        pcall(function()
+                            fireproximityprompt(shardPrompt)
+                        end)
                         local holdTime = shardPrompt.HoldDuration or 0.5
                         task.wait(math.max(0.2, holdTime + 0.1))
                     end
 
                     -- Tunggu konfirmasi shard terambil.
                     local deadline = os.clock() + 1.5
-                    while os.clock() < deadline and not targetShard:GetAttribute("Taken") and getCarriedShardsCount() == 0 do
+                    while os.clock() < deadline
+                        and not targetShard:GetAttribute("Taken")
+                        and getCarriedShardsCount() == 0 do
                         task.wait(0.1)
                     end
 
-                    -- Jika shard berhasil dibawa, setor lalu hitung ulang kebutuhan item.
+                    -- Setor jika shard berhasil masuk ke bawaan.
                     if getCarriedShardsCount() > 0 then
-                        safePivotTo(ICEAGE_COLLECT_CF)
-                        local eraTrip = Workspace:FindFirstChild("EraTrip")
-                        local iceAge = eraTrip and eraTrip:FindFirstChild("IceAge")
-                        local collectPart = iceAge and iceAge:FindFirstChild("EraCollect")
-                        local prompt = collectPart and collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
-                        if prompt then pcall(function() fireproximityprompt(prompt) end) end
-
-                        local depositDeadline = os.clock() + 2.5
-                        while getCarriedShardsCount() > 0 and os.clock() < depositDeadline do
-                            task.wait(0.15)
-                        end
+                        depositIceAgeShards()
+                    else
                         task.wait(0.2)
                     end
                 end
             else
-                -- Belum ada shard di zona item yang dibutuhkan: tunggu dan scan ulang zona yang sama.
+                -- Shard untuk item yang sedang dibutuhkan belum spawn.
+                -- Tunggu dan scan ulang; jangan pindah ke tier lain.
                 safePivotTo(ICEAGE_KICK_READY_CF)
-                task.wait(0.8)
+                task.wait(0.5)
             end
         else
-            -- Semua kebutuhan craft Mammutone sudah terpenuhi; tidak perlu farm shard lagi.
+            -- Semua kebutuhan Mammutone sudah terpenuhi.
             safePivotTo(ICEAGE_KICK_READY_CF)
-            task.wait(0.8)
+            task.wait(0.5)
         end
 
-        -- Mampir ke Trader hanya pada menit terakhir sesuai mekanisme semula.
-        checkFinalMinuteTraderCraft("IceAge", "IceAgeMythic", canCraftIceAgeMythic, ICEAGE_TRADER_CF, ICEAGE_KICK_READY_CF)
+        -- Trader menit terakhir tetap berjalan seperti sebelumnya.
+        checkFinalMinuteTraderCraft(
+            "IceAge", "IceAgeMythic", canCraftIceAgeMythic,
+            ICEAGE_TRADER_CF, ICEAGE_KICK_READY_CF
+        )
+
         task.wait(0.15)
     end
 
