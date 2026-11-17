@@ -1596,18 +1596,57 @@ local function getActiveEggsInNest(nest)
     return eggs
 end
 
+-- Baseline untuk menghindari hitungan EraCarry lama yang belum di-reset setelah setor.
+local jurassicCarryBaseline = 0
+local function getJurassicCarryCount()
+    local rawCount = getCarriedEggsCount()
+    if rawCount <= 0 then
+        jurassicCarryBaseline = 0
+        return 0
+    end
+    return math.max(0, rawCount - jurassicCarryBaseline)
+end
+
+local function flyToJurassicCollect(targetCF)
+    -- Gerakkan karakter bertahap menuju EraCollect agar perjalanan terlihat seperti terbang.
+    local character = player.Character
+    if not character then return false end
+
+    local startCF = character:GetPivot()
+    local distance = (startCF.Position - targetCF.Position).Magnitude
+    local duration = math.clamp(distance / 90, 0.25, 2.5)
+    local steps = math.max(8, math.ceil(duration * 30))
+    local startedAt = os.clock()
+
+    for step = 1, steps do
+        if not autoEraTripEnabled or not isInEra("Jurassic") then return false end
+        local alpha = step / steps
+        local currentCharacter = player.Character
+        if not currentCharacter then return false end
+        pcall(function()
+            currentCharacter:PivotTo(startCF:Lerp(targetCF, alpha))
+        end)
+        local _, root = getCharacterParts()
+        if root then root.AssemblyLinearVelocity = Vector3.zero end
+        local targetTime = duration * alpha
+        local remaining = targetTime - (os.clock() - startedAt)
+        if remaining > 0 then task.wait(remaining) end
+    end
+    return true
+end
+
 local function depositJurassic()
-    -- 1. TP ke EraCollect untuk menetaskan telur
+    -- Setelah telur terambil, terbang bertahap langsung ke EraCollect.
     local eraTrip = Workspace:FindFirstChild("EraTrip")
     local jurassic = eraTrip and eraTrip:FindFirstChild("Jurassic")
     local collectPart = jurassic and jurassic:FindFirstChild("EraCollect", true)
     local targetCF = (collectPart and collectPart:IsA("BasePart")) and collectPart.CFrame or JURASSIC_COLLECT_CF
 
-    safePivotTo(targetCF)
+    flyToJurassicCollect(targetCF)
     local _, myRoot = getCharacterParts()
     if myRoot then myRoot.AssemblyLinearVelocity = Vector3.zero end
 
-    -- Trigger ProximityPrompt jika ada pada part EraCollect
+    -- Trigger ProximityPrompt untuk setor telur.
     if collectPart then
         local prompt = collectPart:FindFirstChildWhichIsA("ProximityPrompt", true)
         if prompt then pcall(function() fireproximityprompt(prompt) end) end
@@ -1623,11 +1662,14 @@ local function depositJurassic()
     end
 
     task.wait(0.2)
-    -- Setelah setor di EraCollect, WAJIB kembali ke KickReady agar siap melooping berikutnya!
-    safePivotTo(JURASSIC_KICK_READY_CF)
-    local _, r = getCharacterParts()
-    if r then r.AssemblyLinearVelocity = Vector3.zero end
-    task.wait(0.3)
+    local rawCarryAfterDeposit = getCarriedEggsCount()
+    if rawCarryAfterDeposit > 0 then
+        -- Server belum memperbarui hitungan lama; jadikan baseline agar tidak setor ulang.
+        jurassicCarryBaseline = rawCarryAfterDeposit
+    else
+        jurassicCarryBaseline = 0
+    end
+    -- Tidak kembali ke KickReady; loop langsung mencari telur berikutnya.
 end
 
 -- ================= ICEAGE ERA SCANNING & AUTOMATION =================
@@ -1828,27 +1870,22 @@ local function handleJurassicEra()
             local chaserPos = chaser:GetPivot().Position
             local dist = (targetPos - chaserPos).Magnitude
             if dist >= safeDist then return true end
-            -- Jika terlalu dekat dengan Chaser, mundur sementara ke KickReady
-            safePivotTo(JURASSIC_KICK_READY_CF)
-            local _, myRoot = getCharacterParts()
-            if myRoot then myRoot.AssemblyLinearVelocity = Vector3.zero end
+            -- Jika Chaser terlalu dekat dengan sarang, tunggu di posisi sekarang
+            -- sampai jalur menuju telur lebih aman; tidak bolak-balik ke KickReady.
             task.wait(0.4)
         end
         return false
     end
 
-    -- Inisialisasi: teleport ke KickReady
-    safePivotTo(JURASSIC_KICK_READY_CF)
-    local _, initRoot = getCharacterParts()
-    if initRoot then initRoot.AssemblyLinearVelocity = Vector3.zero end
-    task.wait(0.4)
+    -- Mulai langsung mencari sarang; tidak perlu singgah ke KickReady.
+    task.wait(0.15)
 
-    local maxCap = 1  -- Ambil 1 telur langsung setor ke EraCollect
+    local maxCap = 1  -- Ambil 1 telur lalu setor ke EraCollect sebelum lanjut farm
     local CHASER_SAFE_DIST = 20  -- jarak aman minimal (studs)
 
     while autoEraTripEnabled and isInEra("Jurassic") and Workspace:GetAttribute("EraTripState") == "Open" do
-        -- 1. Jika masih ada telur yang terbawa, langsung setor ke EraCollect & balik ke KickReady
-        if getCarriedEggsCount() > 0 then
+        -- 1. Jika masih ada telur yang terbawa, langsung setor ke EraCollect
+        if getJurassicCarryCount() > 0 then
             depositJurassic()
         end
 
@@ -1873,11 +1910,8 @@ local function handleJurassicEra()
 
         -- Jika seluruh telur di arena sedang kosong/cooldown respawn:
         if #availableNests == 0 then
-            -- Tunggu sebentar di KickReady secara aman lalu rescan loop
-            safePivotTo(JURASSIC_KICK_READY_CF)
-            local _, myRoot = getCharacterParts()
-            if myRoot then myRoot.AssemblyLinearVelocity = Vector3.zero end
-            task.wait(1.5)
+            -- Tunggu telur respawn di posisi sekarang, lalu scan ulang.
+            task.wait(1.0)
             continue
         end
 
@@ -1926,7 +1960,7 @@ local function handleJurassicEra()
         local eggDeposited = false
         for _, nest in ipairs(processingList) do
             if not autoEraTripEnabled or not isInEra("Jurassic") or Workspace:GetAttribute("EraTripState") ~= "Open" then break end
-            if getCarriedEggsCount() >= maxCap then break end
+            if getJurassicCarryCount() >= maxCap then break end
 
             local nestPos = nest:GetPivot().Position
             local safe = waitForChaserSafe(nestPos, CHASER_SAFE_DIST)
@@ -1942,7 +1976,7 @@ local function handleJurassicEra()
 
             for _, prompt in ipairs(activePrompts) do
                 if not autoEraTripEnabled or not isInEra("Jurassic") or Workspace:GetAttribute("EraTripState") ~= "Open" then break end
-                if getCarriedEggsCount() >= maxCap then break end
+                if getJurassicCarryCount() >= maxCap then break end
                 if not prompt.Enabled or not prompt.Parent then continue end
 
                 -- Teleport ke telur
@@ -1959,8 +1993,8 @@ local function handleJurassicEra()
                 pcall(function() fireproximityprompt(prompt) end)
                 task.wait(math.max(0.75, hold + 0.1))
 
-                -- Begitu ambil 1 telur langsung setor ke EraCollect & kembali ke KickReady!
-                if getCarriedEggsCount() >= maxCap then
+                -- Begitu ambil 1 telur langsung terbang ke EraCollect untuk setor!
+                if getJurassicCarryCount() >= maxCap then
                     depositJurassic()
                     eggDeposited = true
                     break
