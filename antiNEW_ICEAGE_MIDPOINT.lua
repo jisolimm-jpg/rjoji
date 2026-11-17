@@ -1703,9 +1703,15 @@ local function handleIceAgeEra()
                     or getCarriedShardsCount() > 0
 
                 if shardPickedUp then
+                    -- Total waktu sejak shard terkonfirmasi terambil hingga tiba di EraCollect: 3 detik.
+                    local pickupConfirmedAt = os.clock()
                     local midpointPos = shardPos:Lerp(ICEAGE_COLLECT_CF.Position, 0.5)
                     safePivotTo(CFrame.new(midpointPos.X, midpointPos.Y + 2, midpointPos.Z))
-                    task.wait(1.0)
+
+                    local remainingTravelTime = 3 - (os.clock() - pickupConfirmedAt)
+                    if remainingTravelTime > 0 then
+                        task.wait(remainingTravelTime)
+                    end
 
                     safePivotTo(ICEAGE_COLLECT_CF)
                     local eraTrip = Workspace:FindFirstChild("EraTrip")
