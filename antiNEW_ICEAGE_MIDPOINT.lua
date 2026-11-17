@@ -459,6 +459,7 @@ local autoEraTripEnabled = false
 local autoEraTripRunning = false
 local autoEraTripGeneration = 0  -- naik setiap ON/OFF → loop lama otomatis stop
 local movementMode = "TP ⚡"
+local iceShardFarmMode = "Farming Jauh"
 local craftedCount = 0
 
 -- Selected Eras (Supports Multiple Selection)
@@ -814,6 +815,16 @@ EraTripTab:Dropdown({
         elseif typeof(selected) == "string" then
             selectedEras[selected] = true
         end
+    end,
+})
+
+EraTripTab:Dropdown({
+    Title = "Ice Age - Shard Farming Mode",
+    Desc = "Pilih satu mode. Mode baru dipakai setelah proses shard yang sedang berjalan selesai.",
+    Values = { "Farming Jauh", "Farming Terdekat" },
+    Value = "Farming Jauh",
+    Callback = function(option)
+        iceShardFarmMode = option
     end,
 })
 
@@ -1577,8 +1588,10 @@ end
 
 -- ================= ICEAGE ERA SCANNING & AUTOMATION =================
 
--- Ambil semua IceShard yang belum diambil (Taken == false), sort berdasarkan Tier tertinggi
-local function getIceShards()
+-- Ambil semua IceShard yang belum diambil, lalu pilih berdasarkan jarak sesuai mode.
+-- Farming Jauh = shard terjauh dari posisi karakter.
+-- Farming Terdekat = shard terdekat dari posisi karakter.
+local function getIceShards(mode, originPosition)
     local shards = {}
     local eraTrip = Workspace:FindFirstChild("EraTrip")
     local iceAge = eraTrip and eraTrip:FindFirstChild("IceAge")
@@ -1586,12 +1599,25 @@ local function getIceShards()
     if iceBrainrots then
         for _, part in ipairs(iceBrainrots:GetChildren()) do
             if part:IsA("BasePart") and not part:GetAttribute("Taken") then
-                table.insert(shards, {obj = part, tier = part:GetAttribute("Tier") or 1})
+                local distance = originPosition and (part.Position - originPosition).Magnitude or 0
+                table.insert(shards, {
+                    obj = part,
+                    tier = part:GetAttribute("Tier") or 1,
+                    distance = distance,
+                })
             end
         end
     end
-    -- sort: tier tertinggi dulu (Tier 5 Mythic → 1 Common)
-    table.sort(shards, function(a, b) return (a.tier or 1) > (b.tier or 1) end)
+
+    table.sort(shards, function(a, b)
+        if a.distance == b.distance then
+            return (a.tier or 1) > (b.tier or 1)
+        end
+        if mode == "Farming Terdekat" then
+            return a.distance < b.distance
+        end
+        return a.distance > b.distance
+    end)
     return shards
 end
 
@@ -1643,8 +1669,10 @@ local function handleIceAgeEra()
             task.wait(0.2)
         end
 
-        -- 2. Ambil semua shard di arena, sudah terurut dari Tier 5 (Mythic) -> Tier 1
-        local shards = getIceShards()
+        -- 2. Pilih shard berdasarkan mode yang sedang aktif (satu loop, satu mode).
+        local _, scanRootPart = getCharacterParts()
+        local scanOrigin = scanRootPart and scanRootPart.Position
+        local shards = getIceShards(iceShardFarmMode, scanOrigin)
 
         if #shards > 0 then
             -- Langsung pilih shard dengan rarity TERTINGGI
