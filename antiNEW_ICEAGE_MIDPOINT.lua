@@ -1331,6 +1331,38 @@ local function getReadyChests()
     return ready
 end
 
+-- Roman carry counter: abaikan nilai HUD/model lama yang kadang belum reset setelah deposit.
+local romanCarryBaseline = 0
+
+local function getRomanRawCarryCount()
+    local carry = player:GetAttribute("EraCarry")
+    if typeof(carry) == "string" then
+        local count = 0
+        for _ in string.gmatch(carry, "[^,]+") do
+            count = count + 1
+        end
+        return count
+    elseif typeof(carry) == "number" then
+        return math.max(0, carry)
+    end
+
+    return getCarriedCratesCount()
+end
+
+local function getRomanCarryCount()
+    local rawCount = getRomanRawCarryCount()
+
+    if romanCarryBaseline > 0 then
+        if rawCount < romanCarryBaseline then
+            romanCarryBaseline = 0
+            return rawCount
+        end
+        return math.max(0, rawCount - romanCarryBaseline)
+    end
+
+    return rawCount
+end
+
 local function collectDroppedLoot()
     local eraTrip = Workspace:FindFirstChild("EraTrip")
     local roman = eraTrip and (eraTrip:FindFirstChild("Roman") or eraTrip)
@@ -1340,7 +1372,7 @@ local function collectDroppedLoot()
     for _, child in ipairs(roman:GetDescendants()) do
         if child.Name == "DroppedLoot" and child:FindFirstChild("Base") then
             local prompt = child.Base:FindFirstChild("SwapLoot")
-            if prompt and getCarriedCratesCount() < 5 then
+            if prompt and getRomanCarryCount() < 5 then
                 safePivotTo(CFrame.new(child.Base.Position) * CFrame.new(0, 2, 0))
                 task.wait(0.15)
                 pcall(function() fireproximityprompt(prompt) end)
@@ -1393,14 +1425,26 @@ local function fightGuard(guard)
 end
 
 local function depositRoman()
+    -- Simpan jumlah sebelum setor untuk mendeteksi counter lama yang tidak ter-reset.
+    local carryBefore = getRomanRawCarryCount()
+
     -- 1. TP ke EraCollect untuk setor peti
     safePivotTo(ROMAN_COLLECT_CF)
     local depositStart = os.clock()
-    while getCarriedCratesCount() > 0 and os.clock() - depositStart < 2.5 do
+    while getRomanCarryCount() > 0 and os.clock() - depositStart < 2.5 do
         task.wait(0.2)
     end
     task.wait(0.2)
-    
+
+    -- Jika server/HUD masih menampilkan angka lama yang sama, jadikan baseline.
+    -- Loot baru tetap terhitung ketika raw count bertambah lagi.
+    local carryAfter = getRomanRawCarryCount()
+    if carryAfter > 0 and carryAfter >= carryBefore then
+        romanCarryBaseline = carryAfter
+    else
+        romanCarryBaseline = 0
+    end
+
     -- 2. Langsung kembali ke EraKickReady
     safePivotTo(ROMAN_KICK_READY_CF)
     task.wait(0.3)
@@ -1416,24 +1460,24 @@ local function handleRomanEra()
 
     while autoEraTripEnabled and isInEra("Roman") and Workspace:GetAttribute("EraTripState") == "Open" do
         -- 1. Jika tas penuh (>= 5), langsung setor ke EraCollect
-        if getCarriedCratesCount() >= 5 then
+        if getRomanCarryCount() >= 5 then
             depositRoman()
             isWaitingAtKickReady = false
         end
 
         -- 2. Ambil DroppedLoot yang ada di tanah
         collectDroppedLoot()
-        if getCarriedCratesCount() >= 5 then
+        if getRomanCarryCount() >= 5 then
             depositRoman()
             isWaitingAtKickReady = false
         end
 
         -- 3. Cari dan buka Chest yang sudah Ready (Prioritas Tier 5 Mythic -> 1)
         local readyChests = getReadyChests()
-        if #readyChests > 0 and getCarriedCratesCount() < 5 then
+        if #readyChests > 0 and getRomanCarryCount() < 5 then
             isWaitingAtKickReady = false
             for _, item in ipairs(readyChests) do
-                if not autoEraTripEnabled or not isInEra("Roman") or getCarriedCratesCount() >= 5 then break end
+                if not autoEraTripEnabled or not isInEra("Roman") or getRomanCarryCount() >= 5 then break end
                 local chest = item.chest
                 local prompt = item.prompt or (chest:FindFirstChild("ChestBody") and chest.ChestBody:FindFirstChild("OpenChest"))
                 if chest.Parent and (chest:GetAttribute("Ready") == true or (prompt and prompt.Enabled)) then
@@ -1448,14 +1492,14 @@ local function handleRomanEra()
                 end
             end
 
-            if getCarriedCratesCount() >= 5 then
+            if getRomanCarryCount() >= 5 then
                 depositRoman()
             end
         end
 
         -- 4. Cari Guard yang masih hidup (Prioritas Tier 5 Boss -> 1)
         local guards = getRomanGuards()
-        if #guards > 0 and getCarriedCratesCount() < 5 then
+        if #guards > 0 and getRomanCarryCount() < 5 then
             isWaitingAtKickReady = false
             local targetGuard = guards[1]
             local targetName = targetGuard:GetAttribute("Model") or targetGuard.Name
@@ -1467,7 +1511,7 @@ local function handleRomanEra()
             collectDroppedLoot()
             local afterChests = getReadyChests()
             for _, item in ipairs(afterChests) do
-                if getCarriedCratesCount() >= 5 then break end
+                if getRomanCarryCount() >= 5 then break end
                 local chest = item.chest
                 local prompt = item.prompt
                 if chest.Parent and (chest:GetAttribute("Ready") == true or (prompt and prompt.Enabled)) then
@@ -1479,13 +1523,13 @@ local function handleRomanEra()
                 end
             end
 
-            if getCarriedCratesCount() >= 5 then
+            if getRomanCarryCount() >= 5 then
                 depositRoman()
             end
         end
 
         -- 5. Jika tidak ada lagi guard hidup & tidak ada chest ready, tapi masih membawa peti (>0), setor ke EraCollect
-        if #guards == 0 and #readyChests == 0 and getCarriedCratesCount() > 0 then
+        if #guards == 0 and #readyChests == 0 and getRomanCarryCount() > 0 then
             depositRoman()
             isWaitingAtKickReady = false
         end
@@ -1495,7 +1539,7 @@ local function handleRomanEra()
 
         -- 7. Jika arena bersih (guard kalah semua & chest habis), tunggu wave berikutnya di EraKickReady
         -- PENTING: Hanya TP sekali saat masuk mode tunggu agar tidak terjadi loop-teleport yang stuttering!
-        if #guards == 0 and #readyChests == 0 and getCarriedCratesCount() == 0 then
+        if #guards == 0 and #readyChests == 0 and getRomanCarryCount() == 0 then
             statusParagraph:SetDesc("Roman: Menunggu wave guard / chest berikutnya...")
             if not isWaitingAtKickReady then
                 safePivotTo(ROMAN_KICK_READY_CF)
