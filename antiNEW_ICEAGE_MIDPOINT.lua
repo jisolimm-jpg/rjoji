@@ -1705,7 +1705,7 @@ local function handleIceAgeEra()
                 if shardPickedUp then
                     local midpointPos = shardPos:Lerp(ICEAGE_COLLECT_CF.Position, 0.5)
                     safePivotTo(CFrame.new(midpointPos.X, midpointPos.Y + 2, midpointPos.Z))
-                    task.wait(0.25)
+                    task.wait(1.0)
 
                     safePivotTo(ICEAGE_COLLECT_CF)
                     local eraTrip = Workspace:FindFirstChild("EraTrip")
